@@ -44,14 +44,33 @@ async fn main() {
 
     let rest = Router::new()
         .route("/api/tasks", get(list_tasks_handler).post(create_task_handler))
+        .route("/api/tasks/reap", axum::routing::post(reap_tasks_handler))
         .route("/api/tasks/:id", get(get_task_handler).patch(update_task_handler).delete(delete_task_handler))
         .route("/api/tasks/:id/commits", get(list_commits_handler))
+        .route("/api/tasks/:id/reset", axum::routing::post(reset_task_handler))
         .route("/api/activity", get(list_activity_handler))
         .route("/api/agents", get(list_agents_handler))
         .route("/api/stats", get(stats_handler))
         .route("/events", get(sse::sse_handler))
         .layer(cors.clone())
         .with_state(state.clone());
+
+    // Background watchdog: reap stale tasks every 60 seconds
+    let reap_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            if let Ok(ids) = reap_state.db.reap_stale_tasks(10).await {
+                for id in ids {
+                    tracing::info!("Reaped stale task {}", id);
+                    reap_state.broadcaster.broadcast(
+                        serde_json::json!({"event":"task_reaped","data":{"task_id":id}}).to_string()
+                    );
+                }
+            }
+        }
+    });
 
     let mcp = mcp::create_router(state).layer(cors);
 
@@ -215,6 +234,36 @@ async fn list_commits_handler(
 async fn stats_handler(State(s): State<Arc<AppState>>) -> impl IntoResponse {
     match s.db.get_stats().await {
         Ok(stats) => Json(stats).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn reap_tasks_handler(State(s): State<Arc<AppState>>) -> impl IntoResponse {
+    match s.db.reap_stale_tasks(10).await {
+        Ok(ids) => {
+            for id in &ids {
+                s.broadcaster.broadcast(
+                    serde_json::json!({"event":"task_reaped","data":{"task_id":id}}).to_string()
+                );
+            }
+            Json(serde_json::json!({"reaped": ids})).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn reset_task_handler(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match s.db.reset_task(&id).await {
+        Ok(Some(task)) => {
+            s.broadcaster.broadcast(
+                serde_json::json!({"event":"task_updated","data":task}).to_string()
+            );
+            Json(task).into_response()
+        }
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }

@@ -623,6 +623,50 @@ impl Database {
         }).await
     }
 
+    pub async fn reap_stale_tasks(&self, timeout_minutes: i64) -> Result<Vec<String>, tokio_rusqlite::Error> {
+        self.conn.call(move |conn| {
+            let cutoff = format!("-{} minutes", timeout_minutes);
+            let now = Utc::now().to_rfc3339();
+
+            let mut stmt = conn.prepare(
+                "SELECT id FROM tasks WHERE status = 'in_progress' \
+                 AND assigned_agent_id IS NOT NULL AND assigned_agent_id != '' \
+                 AND assigned_agent_id IN \
+                 (SELECT agent_id FROM agents WHERE last_seen < datetime('now', ?1))"
+            )?;
+            let ids: Vec<String> = stmt.query_map(params![cutoff], |row| row.get(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+
+            if !ids.is_empty() {
+                conn.execute(
+                    "UPDATE tasks SET status = 'backlog', assigned_agent_id = NULL, updated_at = ?1 \
+                     WHERE status = 'in_progress' \
+                     AND assigned_agent_id IS NOT NULL AND assigned_agent_id != '' \
+                     AND assigned_agent_id IN \
+                     (SELECT agent_id FROM agents WHERE last_seen < datetime('now', ?2))",
+                    params![now, cutoff],
+                )?;
+            }
+            Ok(ids)
+        }).await
+    }
+
+    pub async fn reset_task(&self, id: &str) -> Result<Option<Task>, tokio_rusqlite::Error> {
+        let id = id.to_string();
+        let now = Utc::now().to_rfc3339();
+        self.conn.call(move |conn| {
+            conn.execute(
+                "UPDATE tasks SET status = 'backlog', assigned_agent_id = NULL, updated_at = ?1 WHERE id = ?2",
+                params![now, id],
+            )?;
+            Ok(conn.query_row(
+                &format!("{} WHERE id = ?1", TASK_SELECT),
+                params![id],
+                row_to_task,
+            ).optional()?)
+        }).await
+    }
+
     pub async fn get_stats(&self) -> Result<Stats, tokio_rusqlite::Error> {
         self.conn.call(|conn| {
             let total: i64 = conn.query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get(0))?;

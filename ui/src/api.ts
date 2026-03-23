@@ -74,3 +74,21 @@ export async function fetchStats(): Promise<Stats> {
   if (!res.ok) throw new Error('Failed to fetch stats')
   return res.json()
 }
+
+export async function fetchCommits(taskId: string): Promise<import('./types').Commit[]> {
+  const res = await fetch(`${BASE}/tasks/${taskId}/commits`)
+  if (!res.ok) throw new Error('Failed to fetch commits')
+  return res.json()
+}
+
+export async function resetTask(id: string): Promise<Task> {
+  const res = await fetch(`${BASE}/tasks/${id}/reset`, { method: 'POST' })
+  if (!res.ok) throw new Error('Failed to reset task')
+  return res.json()
+}
+
+export async function reapTasks(): Promise<{ reaped: string[] }> {
+  const res = await fetch(`${BASE}/tasks/reap`, { method: 'POST' })
+  if (!res.ok) throw new Error('Failed to reap tasks')
+  return res.json()
+}

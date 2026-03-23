@@ -1,6 +1,7 @@
-import { Task, TaskPriority, AgentRole } from '../types'
+import { Task, TaskPriority, AgentRole, Agent } from '../types'
 import AgentBadge from './AgentBadge'
-import { GitBranch, GitCommit } from 'lucide-react'
+import { formatDistanceToNow } from 'date-fns'
+import { GitBranch, GitCommit, AlertTriangle } from 'lucide-react'
 
 export const PRIORITY_CONFIG: Record<TaskPriority, { label: string; bg: string; text: string; dot: string }> = {
   critical: { label: 'Critical', bg: 'bg-red-900/60',    text: 'text-red-300',    dot: 'bg-red-400'    },
@@ -9,14 +10,23 @@ export const PRIORITY_CONFIG: Record<TaskPriority, { label: string; bg: string; 
   low:      { label: 'Low',      bg: 'bg-slate-800',     text: 'text-slate-400',  dot: 'bg-slate-500'  },
 }
 
+const STALE_MS = 10 * 60 * 1000 // 10 minutes
+
+function agentIsStale(agent: Agent | undefined): boolean {
+  if (!agent?.last_seen) return false
+  return Date.now() - new Date(agent.last_seen).getTime() > STALE_MS
+}
+
 interface TaskCardProps {
   task: Task
+  agent?: Agent
   onClick: () => void
   onDragStart: (e: React.DragEvent) => void
 }
 
-export default function TaskCard({ task, onClick, onDragStart }: TaskCardProps) {
+export default function TaskCard({ task, agent, onClick, onDragStart }: TaskCardProps) {
   const p = PRIORITY_CONFIG[task.priority]
+  const stale = agentIsStale(agent)
 
   return (
     <div
@@ -63,6 +73,14 @@ export default function TaskCard({ task, onClick, onDragStart }: TaskCardProps) 
 
       {!task.branch_name && task.assigned_agent_id && (
         <p className="text-xs text-slate-500 font-mono truncate">{task.assigned_agent_id}</p>
+      )}
+
+      {/* Stale agent warning */}
+      {stale && agent?.last_seen && (
+        <div className="flex items-center gap-1 mt-1.5 text-xs text-amber-500/80">
+          <AlertTriangle className="w-3 h-3 shrink-0" />
+          <span>Agent stale · {formatDistanceToNow(new Date(agent.last_seen), { addSuffix: true })}</span>
+        </div>
       )}
     </div>
   )

@@ -1,11 +1,11 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { fetchTask, fetchCommits, updateTask, deleteTask } from '../api'
-import { Task, TaskStatus, TaskPriority, AgentRole, GIT_ACTIONS } from '../types'
+import { fetchTask, fetchCommits, fetchAgents, updateTask, deleteTask, resetTask } from '../api'
+import { Task, TaskStatus, TaskPriority, AgentRole, Agent, GIT_ACTIONS } from '../types'
 import AgentBadge from './AgentBadge'
 import { PRIORITY_CONFIG } from './TaskCard'
 import { formatDistanceToNow } from 'date-fns'
-import { X, Copy, Pencil, Trash2, ChevronDown, GitBranch, GitCommit, ExternalLink, FolderOpen } from 'lucide-react'
+import { X, Copy, Pencil, Trash2, ChevronDown, GitBranch, GitCommit, ExternalLink, FolderOpen, AlertTriangle, RotateCcw } from 'lucide-react'
 
 const STATUSES: TaskStatus[] = ['backlog', 'in_progress', 'in_review', 'testing', 'docs_needed', 'done', 'blocked']
 const PRIORITIES: TaskPriority[] = ['low', 'medium', 'high', 'critical']
@@ -52,6 +52,19 @@ export default function TaskModal({ task: initialTask, onClose }: TaskModalProps
     queryFn: () => fetchCommits(initialTask.id),
   })
 
+  const { data: agents = [] } = useQuery({
+    queryKey: ['agents'],
+    queryFn: fetchAgents,
+    refetchInterval: 15_000,
+  })
+
+  const assignedAgent = task.assigned_agent_id
+    ? (agents as Agent[]).find(a => a.agent_id === task.assigned_agent_id)
+    : undefined
+  const agentIsStale = assignedAgent?.last_seen
+    ? Date.now() - new Date(assignedAgent.last_seen).getTime() > 10 * 60 * 1000
+    : false
+
   const updateMutation = useMutation({
     mutationFn: (data: Parameters<typeof updateTask>[1]) => updateTask(task.id, data),
     onSuccess: () => {
@@ -68,6 +81,15 @@ export default function TaskModal({ task: initialTask, onClose }: TaskModalProps
       queryClient.invalidateQueries({ queryKey: ['tasks'] })
       queryClient.invalidateQueries({ queryKey: ['stats'] })
       onClose()
+    },
+  })
+
+  const resetMutation = useMutation({
+    mutationFn: () => resetTask(task.id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['tasks'] })
+      queryClient.invalidateQueries({ queryKey: ['task', task.id] })
+      queryClient.invalidateQueries({ queryKey: ['stats'] })
     },
   })
 
@@ -164,6 +186,32 @@ export default function TaskModal({ task: initialTask, onClose }: TaskModalProps
                 </div>
               )}
             </div>
+
+            {/* Assigned agent last-seen / stale warning */}
+            {!editing && assignedAgent && (
+              <div className={`flex items-center justify-between rounded-lg px-3 py-2 text-xs ${agentIsStale ? 'bg-amber-950/40 border border-amber-800/50' : 'bg-slate-800/50'}`}>
+                <div className="flex items-center gap-2">
+                  {agentIsStale && <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />}
+                  <span className={agentIsStale ? 'text-amber-300' : 'text-slate-400'}>
+                    <span className="font-mono">{assignedAgent.agent_id}</span>
+                    {assignedAgent.last_seen && (
+                      <span className="ml-2 text-slate-500">
+                        last seen {formatDistanceToNow(new Date(assignedAgent.last_seen), { addSuffix: true })}
+                      </span>
+                    )}
+                  </span>
+                </div>
+                {(agentIsStale || task.status === 'in_progress') && (
+                  <button
+                    onClick={() => { if (confirm('Reset task to backlog and unassign agent?')) resetMutation.mutate() }}
+                    disabled={resetMutation.isPending}
+                    className="flex items-center gap-1 text-xs text-slate-400 hover:text-amber-300 hover:bg-amber-900/30 rounded px-2 py-1 transition-colors disabled:opacity-50"
+                  >
+                    <RotateCcw className="w-3 h-3" /> Reset
+                  </button>
+                )}
+              </div>
+            )}
 
             {/* Description */}
             <div>

@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { fetchTasks, updateTask } from '../api'
-import { Task, TaskStatus } from '../types'
+import { fetchTasks, fetchAgents, updateTask } from '../api'
+import { Task, TaskStatus, Agent } from '../types'
 import TaskCard from './TaskCard'
 import TaskModal from './TaskModal'
 
@@ -39,6 +39,14 @@ export default function Board({ onTaskSelect, selectedTask }: BoardProps) {
     queryKey: ['tasks'],
     queryFn: () => fetchTasks(),
   })
+
+  const { data: agents = [] } = useQuery({
+    queryKey: ['agents'],
+    queryFn: fetchAgents,
+    refetchInterval: 15_000,
+  })
+
+  const agentMap = Object.fromEntries((agents as Agent[]).map(a => [a.agent_id, a]))
 
   const updateMutation = useMutation({
     mutationFn: ({ id, status }: { id: string; status: TaskStatus }) =>
@@ -97,6 +105,7 @@ export default function Board({ onTaskSelect, selectedTask }: BoardProps) {
                   <TaskCard
                     key={task.id}
                     task={task}
+                    agent={task.assigned_agent_id ? agentMap[task.assigned_agent_id] : undefined}
                     onClick={() => onTaskSelect(task)}
                     onDragStart={e => handleDragStart(e, task.id)}
                   />
