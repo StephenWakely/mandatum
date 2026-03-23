@@ -264,6 +264,8 @@ struct UpdateTaskBody {
     priority: Option<String>,
     assigned_role: Option<String>,
     assigned_agent_id: Option<String>,
+    #[serde(default)]
+    clear_agent: bool,
     output_path: Option<String>,
     tags: Option<Vec<String>>,
     branch_name: Option<String>,
@@ -285,7 +287,7 @@ async fn update_task_handler(
         body.status.as_deref(),
         body.priority.as_deref(),
         body.assigned_role.as_deref(),
-        body.assigned_agent_id.as_deref(),
+        if body.clear_agent { Some("") } else { body.assigned_agent_id.as_deref() },
         body.output_path.as_deref(),
         body.tags.as_deref(),
         body.branch_name.as_deref(),

@@ -394,7 +394,9 @@ impl Database {
         let status = status.map(|s| s.to_string());
         let priority = priority.map(|s| s.to_string());
         let assigned_role = assigned_role.map(|s| s.to_string());
-        let assigned_agent_id = assigned_agent_id.map(|s| s.to_string());
+        // Sentinel: empty string means "clear the field to NULL"
+        let clear_agent = assigned_agent_id.map_or(false, |s| s.is_empty());
+        let assigned_agent_id = assigned_agent_id.filter(|s| !s.is_empty()).map(|s| s.to_string());
         let output_path = output_path.map(|s| s.to_string());
         let tags = tags.map(|t| t.to_vec());
         let branch_name = branch_name.map(|s| s.to_string());
@@ -429,8 +431,8 @@ impl Database {
                 _             => existing.assigned_role,
             });
             let new_assigned_role     = derived_role;
-            let new_assigned_agent_id = if status_changed && assigned_agent_id.is_none() {
-                None
+            let new_assigned_agent_id = if status_changed || clear_agent {
+                assigned_agent_id  // None when clearing or status changed
             } else {
                 assigned_agent_id.or(existing.assigned_agent_id)
             };
