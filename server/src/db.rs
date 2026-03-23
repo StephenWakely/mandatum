@@ -419,7 +419,15 @@ impl Database {
             let new_description        = description.or(existing.description);
             let new_status             = status.unwrap_or(existing.status);
             let new_priority           = priority.unwrap_or(existing.priority);
-            let new_assigned_role      = assigned_role.or(existing.assigned_role);
+            // When status changes and no explicit role is provided, derive the
+            // role from the new status so they always stay in sync.
+            let derived_role: Option<String> = assigned_role.or_else(|| match new_status.as_str() {
+                "in_review"   => Some("reviewer".to_string()),
+                "testing"     => Some("tester".to_string()),
+                "docs_needed" => Some("docs_writer".to_string()),
+                _             => existing.assigned_role,
+            });
+            let new_assigned_role      = derived_role;
             let new_assigned_agent_id  = assigned_agent_id.or(existing.assigned_agent_id);
             let new_output_path        = output_path.or(existing.output_path);
             let new_tags               = tags.unwrap_or(existing.tags);

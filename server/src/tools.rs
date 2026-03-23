@@ -96,27 +96,14 @@ async fn get_next_task(args: Value, ctx: &ToolContext) -> Result<Value, String> 
     }
 }
 
-/// Map a status to the role that owns it, so assigned_role stays consistent.
-fn role_for_status(status: &str) -> Option<&'static str> {
-    match status {
-        "in_review"    => Some("reviewer"),
-        "testing"      => Some("tester"),
-        "docs_needed"  => Some("docs_writer"),
-        "backlog" | "in_progress" | "done" | "blocked" => None,
-        _ => None,
-    }
-}
-
 async fn update_task_status(args: Value, ctx: &ToolContext) -> Result<Value, String> {
     let agent_id = args["agent_id"].as_str().ok_or("Missing agent_id")?;
     let task_id = args["task_id"].as_str().ok_or("Missing task_id")?;
     let status = args["status"].as_str().ok_or("Missing status")?;
     let note = args["note"].as_str();
 
-    let new_role = role_for_status(status);
-
     let task = ctx.db.update_task(
-        task_id, None, None, Some(status), None, new_role, None, None, None,
+        task_id, None, None, Some(status), None, None, None, None, None,
         None, None, None, None, None,
     ).await.map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Task {} not found", task_id))?;
