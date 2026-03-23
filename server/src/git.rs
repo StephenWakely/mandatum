@@ -18,10 +18,12 @@ pub async fn merge_branch(
 
     info!(repo = repo_path, branch, base = base_branch, "merge: starting");
 
-    // 1. Create a temporary worktree on base_branch
-    info!(worktree = %tmp_str, base = base_branch, "merge: creating temp worktree");
+    // 1. Create a detached-HEAD worktree at base_branch's current commit.
+    //    Using --detach avoids "already checked out" errors when base_branch
+    //    is the active branch in the main working tree.
+    info!(worktree = %tmp_str, base = base_branch, "merge: creating detached temp worktree");
     let add = Command::new("git")
-        .args(["-C", repo_path, "worktree", "add", &tmp_str, base_branch])
+        .args(["-C", repo_path, "worktree", "add", "--detach", &tmp_str, base_branch])
         .output()
         .await
         .map_err(|e| format!("git worktree add failed: {}", e))?;
@@ -59,9 +61,28 @@ pub async fn merge_branch(
         .map_err(|e| format!("git rev-parse failed: {}", e))?;
 
     let hash = String::from_utf8_lossy(&rev.stdout).trim().to_string();
+
+    // 4. Advance base_branch to the merge commit via update-ref.
+    //    This works even when base_branch is checked out in another worktree
+    //    (git branch -f would be blocked in that case).
+    info!(branch, base = base_branch, commit = %hash, "merge: advancing branch ref");
+    let refname = format!("refs/heads/{}", base_branch);
+    let update = Command::new("git")
+        .args(["-C", repo_path, "update-ref", &refname, &hash])
+        .output()
+        .await
+        .map_err(|e| format!("git update-ref failed: {}", e))?;
+
+    if !update.status.success() {
+        let stderr = String::from_utf8_lossy(&update.stderr).trim().to_string();
+        warn!(error = %stderr, "merge: update-ref failed");
+        let _ = cleanup_worktree(repo_path, &tmp_str).await;
+        return Err(format!("git update-ref: {}", stderr));
+    }
+
     info!(branch, base = base_branch, commit = %hash, "merge: success");
 
-    // 4. Clean up
+    // 5. Clean up
     info!(worktree = %tmp_str, "merge: removing temp worktree");
     let _ = cleanup_worktree(repo_path, &tmp_str).await;
 
