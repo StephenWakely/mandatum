@@ -24,6 +24,63 @@ pub struct AppState {
     pub broadcaster: SseBroadcaster,
 }
 
+struct Config {
+    db_path:  String,
+    rest_port: u16,
+    mcp_port:  u16,
+}
+
+impl Config {
+    fn from_args() -> Self {
+        let args: Vec<String> = std::env::args().collect();
+        let mut cfg = Config {
+            db_path:   "tasks.db".to_string(),
+            rest_port: 3001,
+            mcp_port:  3002,
+        };
+        let mut i = 1;
+        while i < args.len() {
+            match args[i].as_str() {
+                "--db" | "-d" => {
+                    i += 1;
+                    cfg.db_path = args.get(i).cloned().unwrap_or_else(|| {
+                        eprintln!("Error: --db requires a path"); std::process::exit(1)
+                    });
+                }
+                "--rest-port" | "-r" => {
+                    i += 1;
+                    cfg.rest_port = args.get(i).and_then(|v| v.parse().ok()).unwrap_or_else(|| {
+                        eprintln!("Error: --rest-port requires a number"); std::process::exit(1)
+                    });
+                }
+                "--mcp-port" | "-m" => {
+                    i += 1;
+                    cfg.mcp_port = args.get(i).and_then(|v| v.parse().ok()).unwrap_or_else(|| {
+                        eprintln!("Error: --mcp-port requires a number"); std::process::exit(1)
+                    });
+                }
+                "--help" | "-h" => {
+                    println!("Usage: mandatum-server [OPTIONS]");
+                    println!();
+                    println!("Options:");
+                    println!("  -d, --db <path>         SQLite database path  [default: tasks.db]");
+                    println!("  -r, --rest-port <port>  REST API port          [default: 3001]");
+                    println!("  -m, --mcp-port <port>   MCP/SSE port           [default: 3002]");
+                    println!("  -h, --help              Print this help");
+                    std::process::exit(0);
+                }
+                unknown => {
+                    eprintln!("Error: unknown argument '{}'", unknown);
+                    eprintln!("Run with --help for usage.");
+                    std::process::exit(1);
+                }
+            }
+            i += 1;
+        }
+        cfg
+    }
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -33,7 +90,9 @@ async fn main() {
         )
         .init();
 
-    let db = Database::new("tasks.db").await.expect("Failed to open database");
+    let cfg = Config::from_args();
+
+    let db = Database::new(&cfg.db_path).await.expect("Failed to open database");
     let broadcaster = SseBroadcaster::new();
     let state = Arc::new(AppState { db, broadcaster });
 
@@ -74,11 +133,12 @@ async fn main() {
 
     let mcp = mcp::create_router(state).layer(cors);
 
-    tracing::info!("REST API  → http://0.0.0.0:3001");
-    tracing::info!("MCP/SSE   → http://0.0.0.0:3002/sse");
+    tracing::info!("Database  → {}", cfg.db_path);
+    tracing::info!("REST API  → http://0.0.0.0:{}", cfg.rest_port);
+    tracing::info!("MCP/SSE   → http://0.0.0.0:{}/sse", cfg.mcp_port);
 
-    let rest_listener = tokio::net::TcpListener::bind("0.0.0.0:3001").await.unwrap();
-    let mcp_listener = tokio::net::TcpListener::bind("0.0.0.0:3002").await.unwrap();
+    let rest_listener = tokio::net::TcpListener::bind(("0.0.0.0", cfg.rest_port)).await.unwrap();
+    let mcp_listener  = tokio::net::TcpListener::bind(("0.0.0.0", cfg.mcp_port)).await.unwrap();
 
     let _ = tokio::join!(
         axum::serve(rest_listener, rest),
