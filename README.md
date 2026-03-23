@@ -39,6 +39,12 @@ cd ui && npm install && cd ..
 
 That's it — the Rust dependencies are fetched automatically on first `cargo build` or `cargo run`.
 
+In the **project repo** that agents will work on, add `.worktrees/` to `.gitignore` so agent working directories are not committed:
+
+```bash
+echo '.worktrees/' >> /path/to/your/project/.gitignore
+```
+
 ## Running in Development
 
 ### Option A — one command (recommended)
@@ -63,6 +69,93 @@ cd ui && npm run dev
 Once running, open **http://localhost:5173** in your browser.
 
 > **First run note:** `cargo run` will compile all Rust dependencies, which takes 1–2 minutes. Subsequent runs are instant.
+
+## Running Autonomous Agents
+
+Agents are Claude Code instances running in non-interactive (`--print`) mode, looped by shell scripts. After completing a task they restart automatically rather than waiting for user input.
+
+### Prerequisites
+
+- `claude` CLI on your `PATH` — install via [Claude Code](https://claude.ai/claude-code)
+- The Mandatum server must be running (`make dev` or `cargo run`)
+- The project the agents will work on must be a git repository
+
+### Quickstart
+
+```bash
+# From inside your project repo — launch one of each agent type
+make -C /path/to/mandatum agents PROJECT_DIR=$(pwd)
+
+# Or use the script directly
+/path/to/mandatum/agents/run-all.sh /path/to/your/project
+```
+
+Press **Ctrl-C** to stop all agents cleanly.
+
+### Running individual agents
+
+Each role has its own script. All accept an optional agent ID and project directory:
+
+```bash
+# Usage: run-<role>.sh [agent-id] [project-dir]
+# PROJECT_DIR env var is also accepted.
+
+/path/to/mandatum/agents/run-coder.sh    coder-alpha   /path/to/project
+/path/to/mandatum/agents/run-reviewer.sh reviewer-1    /path/to/project
+/path/to/mandatum/agents/run-tester.sh   tester-1      /path/to/project
+/path/to/mandatum/agents/run-docs.sh     docs-1        /path/to/project
+```
+
+Run multiple coders in parallel by opening separate terminals with different agent IDs:
+
+```bash
+# Terminal 1
+run-coder.sh coder-alpha /path/to/project
+
+# Terminal 2
+run-coder.sh coder-beta /path/to/project
+```
+
+### Project directory vs Mandatum directory
+
+The scripts separate two concerns:
+
+| Path | Purpose |
+|------|---------|
+| Mandatum directory | Where the tracker server lives (`make dev`, `tasks.db`) |
+| Project directory | The git repo agents check out branches and commit code into |
+
+The MCP config path is always resolved relative to the `agents/` folder regardless of where you invoke the script from. The `claude` process runs with its cwd set to your project directory so all git operations land in the right repo.
+
+### How the loop works
+
+Each script runs `claude --print "<system-prompt>"` in a shell loop:
+
+```
+claude --print "..." → agent runs, completes task, exits
+        ↓ (10s pause)
+claude --print "..." → agent picks up next task
+        ↓
+        ...
+```
+
+If an agent's tokens are exhausted mid-task, the process exits and the loop restarts after 10 seconds. The server's watchdog will reap the stuck task back to `backlog` within 10 minutes so another agent (or the restarted one) can claim it.
+
+### Stale agent detection
+
+The server automatically resets `in_progress` tasks whose assigned agent hasn't sent a heartbeat in **10 minutes**, moving them back to `backlog`. You can also trigger this manually:
+
+```bash
+# Reap all stale tasks at once
+curl -X POST http://localhost:3001/api/tasks/reap
+
+# Reset a specific task
+curl -X POST http://localhost:3001/api/tasks/<task-id>/reset
+```
+
+The UI shows a ⚠ warning on any task card whose agent is stale, and a **Reset** button inside the task modal.
+
+---
 
 ## Seeding Sample Data
 
@@ -212,6 +305,10 @@ For Claude Code CLI:
 ```bash
 claude mcp add --transport http task-tracker http://localhost:3002
 ```
+
+### Using the runner scripts (recommended)
+
+The `agents/` directory contains pre-configured runner scripts that handle the MCP connection automatically. See [Running Autonomous Agents](#running-autonomous-agents) above — no manual MCP config needed.
 
 ### Multiple Agents Simultaneously
 
