@@ -79,7 +79,7 @@ async fn dispatch(req: JsonRpcRequest, state: &Arc<AppState>) -> JsonRpcResponse
                 None => return JsonRpcResponse::err(id, -32602, "Missing tool name".into()),
             };
             let arguments = params["arguments"].clone();
-            let ctx = ToolContext { db: state.db.clone(), broadcaster: state.broadcaster.clone() };
+            let ctx = ToolContext { db: state.db.clone(), broadcaster: state.broadcaster.clone(), repo_path: state.repo_path.clone() };
             match handle_tool_call(&name, arguments, &ctx).await {
                 Ok(result) => JsonRpcResponse::ok(id, json!({
                     "content": [{ "type": "text", "text": result.to_string() }]

@@ -1,4 +1,5 @@
 mod db;
+mod git;
 mod mcp;
 mod sse;
 mod tools;
@@ -23,6 +24,7 @@ use sse::SseBroadcaster;
 pub struct AppState {
     pub db: Database,
     pub broadcaster: SseBroadcaster,
+    pub repo_path: Option<String>,
 }
 
 struct Config {
@@ -30,6 +32,7 @@ struct Config {
     rest_port: u16,
     mcp_port:  u16,
     ui_path:   Option<String>,
+    repo_path: Option<String>,
 }
 
 impl Config {
@@ -40,6 +43,7 @@ impl Config {
             rest_port: 3001,
             mcp_port:  3002,
             ui_path:   None,
+            repo_path: None,
         };
         let mut i = 1;
         while i < args.len() {
@@ -68,6 +72,12 @@ impl Config {
                         eprintln!("Error: --ui requires a path"); std::process::exit(1)
                     }));
                 }
+                "--repo" => {
+                    i += 1;
+                    cfg.repo_path = Some(args.get(i).cloned().unwrap_or_else(|| {
+                        eprintln!("Error: --repo requires a path"); std::process::exit(1)
+                    }));
+                }
                 "--help" | "-h" => {
                     println!("Usage: mandatum-server [OPTIONS]");
                     println!();
@@ -76,6 +86,7 @@ impl Config {
                     println!("  -r, --rest-port <port>  REST API port               [default: 3001]");
                     println!("  -m, --mcp-port <port>   MCP/SSE port                [default: 3002]");
                     println!("  -u, --ui <path>         Serve React app from path   [default: ui/dist if it exists]");
+                    println!("      --repo <path>        Git repo to auto-merge into on task done");
                     println!("  -h, --help              Print this help");
                     std::process::exit(0);
                 }
@@ -108,7 +119,7 @@ async fn main() {
 
     let db = Database::new(&cfg.db_path).await.expect("Failed to open database");
     let broadcaster = SseBroadcaster::new();
-    let state = Arc::new(AppState { db, broadcaster });
+    let state = Arc::new(AppState { db, broadcaster, repo_path: cfg.repo_path.clone() });
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -158,6 +169,9 @@ async fn main() {
     tracing::info!("MCP/SSE   → http://0.0.0.0:{}/sse", cfg.mcp_port);
     if let Some(ref p) = cfg.ui_path {
         tracing::info!("React UI  → http://0.0.0.0:{} (serving {})", cfg.rest_port, p);
+    }
+    if let Some(ref p) = cfg.repo_path {
+        tracing::info!("Auto-merge → enabled (repo: {})", p);
     }
 
     let rest_listener = tokio::net::TcpListener::bind(("0.0.0.0", cfg.rest_port)).await.unwrap();
@@ -272,6 +286,32 @@ async fn update_task_handler(
             s.broadcaster.broadcast(
                 serde_json::json!({"event":"task_updated","data":task}).to_string()
             );
+            // Auto-merge when task is marked done via REST
+            if body.status.as_deref() == Some("done") {
+                if let (Some(ref repo_path), Some(ref branch)) = (&s.repo_path, &task.branch_name) {
+                    let base = if task.base_branch.is_empty() { "main".to_string() } else { task.base_branch.clone() };
+                    let merge_msg = format!("Merge branch '{}' — task {} done", branch, id);
+                    match git::merge_branch(repo_path, branch, &base, &merge_msg).await {
+                        Ok(hash) => {
+                            tracing::info!("Auto-merged {} into {} ({})", branch, base, &hash[..hash.len().min(8)]);
+                            let _ = s.db.add_activity(&id, None, None, "merged",
+                                Some(&format!("Merged '{}' into '{}' ({})", branch, base, &hash[..hash.len().min(8)])))
+                                .await;
+                        }
+                        Err(e) => {
+                            tracing::warn!("Auto-merge failed for task {}: {}", id, e);
+                            let _ = s.db.update_task(
+                                &id, None, None, Some("blocked"), None, None, None, None, None,
+                                None, None, None, None, None,
+                            ).await;
+                            let _ = s.db.add_activity(&id, None, None, "merge_failed",
+                                Some(&format!("Auto-merge failed: {}", e)))
+                                .await;
+                            return (StatusCode::CONFLICT, e).into_response();
+                        }
+                    }
+                }
+            }
             Json(task).into_response()
         }
         Ok(None) => StatusCode::NOT_FOUND.into_response(),

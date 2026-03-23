@@ -5,6 +5,7 @@ use crate::sse::SseBroadcaster;
 pub struct ToolContext {
     pub db: Database,
     pub broadcaster: SseBroadcaster,
+    pub repo_path: Option<String>,
 }
 
 pub async fn handle_tool_call(
@@ -109,6 +110,38 @@ async fn update_task_status(args: Value, ctx: &ToolContext) -> Result<Value, Str
 
     broadcast(ctx, "task_updated", &serde_json::json!(task));
     broadcast(ctx, "activity_added", &serde_json::json!(entry));
+
+    // Auto-merge when task is marked done and server has a repo configured
+    if status == "done" {
+        if let (Some(ref repo_path), Some(ref branch)) = (&ctx.repo_path, &task.branch_name) {
+            let base = if task.base_branch.is_empty() { "main".to_string() } else { task.base_branch.clone() };
+            let merge_msg = format!("Merge branch '{}' — task {} done", branch, task_id);
+            match crate::git::merge_branch(repo_path, branch, &base, &merge_msg).await {
+                Ok(hash) => {
+                    tracing::info!("Auto-merged {} into {} ({})", branch, base, &hash[..hash.len().min(8)]);
+                    let _ = ctx.db.add_activity(task_id, Some(agent_id), role.as_deref(), "merged",
+                        Some(&format!("Merged '{}' into '{}' ({})", branch, base, &hash[..hash.len().min(8)])))
+                        .await;
+                }
+                Err(e) => {
+                    tracing::warn!("Auto-merge failed for task {}: {}", task_id, e);
+                    let _ = ctx.db.update_task(
+                        task_id, None, None, Some("blocked"), None, None, None, None, None,
+                        None, None, None, None, None,
+                    ).await;
+                    let _ = ctx.db.add_activity(task_id, Some(agent_id), role.as_deref(), "merge_failed",
+                        Some(&format!("Auto-merge failed: {}", e)))
+                        .await;
+                    let updated = ctx.db.get_task(task_id).await.ok().flatten();
+                    if let Some(ref t) = updated {
+                        broadcast(ctx, "task_updated", &serde_json::json!(t));
+                    }
+                    return Err(format!("Auto-merge failed: {}", e));
+                }
+            }
+        }
+    }
+
     Ok(serde_json::json!({"task": task}))
 }
 
