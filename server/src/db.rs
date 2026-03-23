@@ -18,6 +18,13 @@ pub struct Task {
     pub updated_at: String,
     pub output_path: Option<String>,
     pub tags: Vec<String>,
+    // git fields
+    pub branch_name: Option<String>,
+    pub base_branch: String,
+    pub latest_commit: Option<String>,
+    pub commit_count: i64,
+    pub pr_url: Option<String>,
+    pub worktree_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,6 +32,17 @@ pub struct TaskWithActivity {
     #[serde(flatten)]
     pub task: Task,
     pub activity: Vec<ActivityEntry>,
+    pub commits: Vec<Commit>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Commit {
+    pub id: String,
+    pub task_id: String,
+    pub agent_id: Option<String>,
+    pub hash: String,
+    pub message: String,
+    pub timestamp: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,23 +71,51 @@ pub struct Stats {
     pub by_role: std::collections::HashMap<String, i64>,
 }
 
+/// Slugify a task title for use in branch names.
+pub fn branch_slug(title: &str) -> String {
+    let slug: String = title
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect();
+    // collapse runs of dashes, strip leading/trailing
+    let parts: Vec<&str> = slug.split('-').filter(|s| !s.is_empty()).collect();
+    parts.join("-").chars().take(40).collect()
+}
+
+/// Suggest a branch name for a task.
+pub fn suggest_branch(task_id: &str, title: &str) -> String {
+    let short_id = &task_id[..task_id.len().min(8)];
+    format!("feature/{}-{}", short_id, branch_slug(title))
+}
+
 fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
     let tags_str: String = row.get::<_, String>(10).unwrap_or_else(|_| "[]".to_string());
     let tags: Vec<String> = serde_json::from_str(&tags_str).unwrap_or_default();
     Ok(Task {
-        id: row.get(0)?,
-        title: row.get(1)?,
-        description: row.get(2)?,
-        status: row.get(3)?,
-        assigned_role: row.get(4)?,
-        assigned_agent_id: row.get(5)?,
-        priority: row.get(6)?,
-        created_at: row.get(7)?,
-        updated_at: row.get(8)?,
-        output_path: row.get(9)?,
+        id:                 row.get(0)?,
+        title:              row.get(1)?,
+        description:        row.get(2)?,
+        status:             row.get(3)?,
+        assigned_role:      row.get(4)?,
+        assigned_agent_id:  row.get(5)?,
+        priority:           row.get(6)?,
+        created_at:         row.get(7)?,
+        updated_at:         row.get(8)?,
+        output_path:        row.get(9)?,
         tags,
+        branch_name:   row.get(11).unwrap_or(None),
+        base_branch:   row.get::<_, Option<String>>(12).unwrap_or(None).unwrap_or_else(|| "main".to_string()),
+        latest_commit: row.get(13).unwrap_or(None),
+        commit_count:  row.get::<_, Option<i64>>(14).unwrap_or(None).unwrap_or(0),
+        pr_url:        row.get(15).unwrap_or(None),
+        worktree_path: row.get(16).unwrap_or(None),
     })
 }
+
+const TASK_SELECT: &str = "SELECT id, title, description, status, assigned_role, assigned_agent_id, \
+    priority, created_at, updated_at, output_path, tags, \
+    branch_name, base_branch, latest_commit, commit_count, pr_url, worktree_path FROM tasks";
 
 #[derive(Clone)]
 pub struct Database {
@@ -117,7 +163,23 @@ impl Database {
                     last_seen TEXT,
                     current_task_id TEXT
                 );
+                CREATE TABLE IF NOT EXISTS commits (
+                    id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    agent_id TEXT,
+                    hash TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    FOREIGN KEY (task_id) REFERENCES tasks(id)
+                );
             ")?;
+            // Migrate existing DBs — ignore errors if columns already exist
+            let _ = conn.execute("ALTER TABLE tasks ADD COLUMN branch_name TEXT", []);
+            let _ = conn.execute("ALTER TABLE tasks ADD COLUMN base_branch TEXT DEFAULT 'main'", []);
+            let _ = conn.execute("ALTER TABLE tasks ADD COLUMN latest_commit TEXT", []);
+            let _ = conn.execute("ALTER TABLE tasks ADD COLUMN commit_count INTEGER DEFAULT 0", []);
+            let _ = conn.execute("ALTER TABLE tasks ADD COLUMN pr_url TEXT", []);
+            let _ = conn.execute("ALTER TABLE tasks ADD COLUMN worktree_path TEXT", []);
             Ok(())
         }).await
     }
@@ -129,7 +191,7 @@ impl Database {
         agent_id: Option<String>,
     ) -> Result<Vec<Task>, tokio_rusqlite::Error> {
         self.conn.call(move |conn| {
-            let mut query = "SELECT id, title, description, status, assigned_role, assigned_agent_id, priority, created_at, updated_at, output_path, tags FROM tasks".to_string();
+            let mut query = TASK_SELECT.to_string();
             let mut where_parts: Vec<String> = Vec::new();
             if let Some(ref s) = status {
                 where_parts.push(format!("status = '{}'", s.replace('\'', "''")));
@@ -145,7 +207,6 @@ impl Database {
                 query.push_str(&where_parts.join(" AND "));
             }
             query.push_str(" ORDER BY created_at DESC");
-
             let mut stmt = conn.prepare(&query)?;
             let tasks = stmt.query_map([], row_to_task)?.collect::<Result<Vec<_>, _>>()?;
             Ok(tasks)
@@ -156,7 +217,7 @@ impl Database {
         let id = id.to_string();
         self.conn.call(move |conn| {
             Ok(conn.query_row(
-                "SELECT id, title, description, status, assigned_role, assigned_agent_id, priority, created_at, updated_at, output_path, tags FROM tasks WHERE id = ?1",
+                &format!("{} WHERE id = ?1", TASK_SELECT),
                 params![id],
                 row_to_task,
             ).optional()?)
@@ -171,7 +232,8 @@ impl Database {
             Some(task) => {
                 let task_id = task.id.clone();
                 let activity = self.get_activity_for_task(&task_id).await?;
-                Ok(Some(TaskWithActivity { task, activity }))
+                let commits = self.list_commits_for_task(&task_id).await?;
+                Ok(Some(TaskWithActivity { task, activity, commits }))
             }
         }
     }
@@ -180,7 +242,8 @@ impl Database {
         let task_id = task_id.to_string();
         self.conn.call(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, task_id, agent_id, agent_role, action, detail, timestamp FROM activity_log WHERE task_id = ?1 ORDER BY timestamp DESC"
+                "SELECT id, task_id, agent_id, agent_role, action, detail, timestamp \
+                 FROM activity_log WHERE task_id = ?1 ORDER BY timestamp DESC"
             )?;
             let entries = stmt.query_map(params![task_id], |row| Ok(ActivityEntry {
                 id: row.get(0)?,
@@ -193,6 +256,57 @@ impl Database {
             }))?.collect::<Result<Vec<_>, _>>()?;
             Ok(entries)
         }).await
+    }
+
+    pub async fn list_commits_for_task(&self, task_id: &str) -> Result<Vec<Commit>, tokio_rusqlite::Error> {
+        let task_id = task_id.to_string();
+        self.conn.call(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, task_id, agent_id, hash, message, timestamp \
+                 FROM commits WHERE task_id = ?1 ORDER BY timestamp DESC"
+            )?;
+            let commits = stmt.query_map(params![task_id], |row| Ok(Commit {
+                id: row.get(0)?,
+                task_id: row.get(1)?,
+                agent_id: row.get(2)?,
+                hash: row.get(3)?,
+                message: row.get(4)?,
+                timestamp: row.get(5)?,
+            }))?.collect::<Result<Vec<_>, _>>()?;
+            Ok(commits)
+        }).await
+    }
+
+    pub async fn add_commit(
+        &self,
+        task_id: &str,
+        agent_id: Option<&str>,
+        hash: &str,
+        message: &str,
+    ) -> Result<Commit, tokio_rusqlite::Error> {
+        let commit = Commit {
+            id: Uuid::new_v4().to_string(),
+            task_id: task_id.to_string(),
+            agent_id: agent_id.map(|s| s.to_string()),
+            hash: hash.to_string(),
+            message: message.to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+        };
+        let c = commit.clone();
+        let task_id_owned = task_id.to_string();
+        self.conn.call(move |conn| {
+            conn.execute(
+                "INSERT INTO commits (id, task_id, agent_id, hash, message, timestamp) VALUES (?1,?2,?3,?4,?5,?6)",
+                params![c.id, c.task_id, c.agent_id, c.hash, c.message, c.timestamp],
+            )?;
+            // update task latest_commit and increment commit_count
+            conn.execute(
+                "UPDATE tasks SET latest_commit = ?1, commit_count = commit_count + 1, updated_at = ?2 WHERE id = ?3",
+                params![c.hash, c.timestamp, task_id_owned],
+            )?;
+            Ok(())
+        }).await?;
+        Ok(commit)
     }
 
     pub async fn create_task(
@@ -220,26 +334,36 @@ impl Database {
             updated_at: now.clone(),
             output_path: None,
             tags: tags.to_vec(),
+            branch_name: None,
+            base_branch: "main".to_string(),
+            latest_commit: None,
+            commit_count: 0,
+            pr_url: None,
+            worktree_path: None,
         };
 
-        let task_clone = task.clone();
+        let t = task.clone();
         let agent_id_owned = agent_id.map(|s| s.to_string());
 
         self.conn.call(move |conn| {
             conn.execute(
-                "INSERT INTO tasks (id, title, description, status, assigned_role, assigned_agent_id, priority, created_at, updated_at, output_path, tags) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                "INSERT INTO tasks (id, title, description, status, assigned_role, assigned_agent_id, \
+                 priority, created_at, updated_at, output_path, tags, branch_name, base_branch, \
+                 latest_commit, commit_count, pr_url, worktree_path) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
                 params![
-                    task_clone.id, task_clone.title, task_clone.description,
-                    task_clone.status, task_clone.assigned_role, task_clone.assigned_agent_id,
-                    task_clone.priority, task_clone.created_at, task_clone.updated_at,
-                    task_clone.output_path, tags_json
+                    t.id, t.title, t.description, t.status, t.assigned_role, t.assigned_agent_id,
+                    t.priority, t.created_at, t.updated_at, t.output_path, tags_json,
+                    t.branch_name, t.base_branch, t.latest_commit, t.commit_count, t.pr_url,
+                    t.worktree_path
                 ],
             )?;
-            let activity_id = Uuid::new_v4().to_string();
+            let aid = Uuid::new_v4().to_string();
             let now2 = Utc::now().to_rfc3339();
             conn.execute(
-                "INSERT INTO activity_log (id, task_id, agent_id, agent_role, action, detail, timestamp) VALUES (?1,?2,?3,?4,?5,?6,?7)",
-                params![activity_id, task_clone.id, agent_id_owned, Option::<String>::None, "created", Option::<String>::None, now2],
+                "INSERT INTO activity_log (id, task_id, agent_id, agent_role, action, detail, timestamp) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                params![aid, t.id, agent_id_owned, Option::<String>::None, "created", Option::<String>::None, now2],
             )?;
             Ok(())
         }).await?;
@@ -258,6 +382,11 @@ impl Database {
         assigned_agent_id: Option<&str>,
         output_path: Option<&str>,
         tags: Option<&[String]>,
+        branch_name: Option<&str>,
+        base_branch: Option<&str>,
+        latest_commit: Option<&str>,
+        pr_url: Option<&str>,
+        worktree_path: Option<&str>,
     ) -> Result<Option<Task>, tokio_rusqlite::Error> {
         let id = id.to_string();
         let title = title.map(|s| s.to_string());
@@ -268,10 +397,15 @@ impl Database {
         let assigned_agent_id = assigned_agent_id.map(|s| s.to_string());
         let output_path = output_path.map(|s| s.to_string());
         let tags = tags.map(|t| t.to_vec());
+        let branch_name = branch_name.map(|s| s.to_string());
+        let base_branch = base_branch.map(|s| s.to_string());
+        let latest_commit = latest_commit.map(|s| s.to_string());
+        let pr_url = pr_url.map(|s| s.to_string());
+        let worktree_path = worktree_path.map(|s| s.to_string());
 
         self.conn.call(move |conn| {
             let existing = conn.query_row(
-                "SELECT id, title, description, status, assigned_role, assigned_agent_id, priority, created_at, updated_at, output_path, tags FROM tasks WHERE id = ?1",
+                &format!("{} WHERE id = ?1", TASK_SELECT),
                 params![id],
                 row_to_task,
             ).optional()?;
@@ -281,20 +415,33 @@ impl Database {
                 None => return Ok(None),
             };
 
-            let new_title = title.unwrap_or(existing.title);
-            let new_description = description.or(existing.description);
-            let new_status = status.unwrap_or(existing.status);
-            let new_priority = priority.unwrap_or(existing.priority);
-            let new_assigned_role = assigned_role.or(existing.assigned_role);
-            let new_assigned_agent_id = assigned_agent_id.or(existing.assigned_agent_id);
-            let new_output_path = output_path.or(existing.output_path);
-            let new_tags = tags.unwrap_or(existing.tags);
-            let tags_json = serde_json::to_string(&new_tags).unwrap_or_else(|_| "[]".to_string());
-            let now = Utc::now().to_rfc3339();
+            let new_title              = title.unwrap_or(existing.title);
+            let new_description        = description.or(existing.description);
+            let new_status             = status.unwrap_or(existing.status);
+            let new_priority           = priority.unwrap_or(existing.priority);
+            let new_assigned_role      = assigned_role.or(existing.assigned_role);
+            let new_assigned_agent_id  = assigned_agent_id.or(existing.assigned_agent_id);
+            let new_output_path        = output_path.or(existing.output_path);
+            let new_tags               = tags.unwrap_or(existing.tags);
+            let new_branch_name        = branch_name.or(existing.branch_name);
+            let new_base_branch        = base_branch.unwrap_or(existing.base_branch);
+            let new_latest_commit      = latest_commit.or(existing.latest_commit);
+            let new_pr_url             = pr_url.or(existing.pr_url);
+            let new_worktree_path      = worktree_path.or(existing.worktree_path);
+            let tags_json              = serde_json::to_string(&new_tags).unwrap_or_else(|_| "[]".to_string());
+            let now                    = Utc::now().to_rfc3339();
 
             conn.execute(
-                "UPDATE tasks SET title=?2,description=?3,status=?4,priority=?5,assigned_role=?6,assigned_agent_id=?7,output_path=?8,tags=?9,updated_at=?1 WHERE id=?10",
-                params![now, new_title, new_description, new_status, new_priority, new_assigned_role, new_assigned_agent_id, new_output_path, tags_json, id],
+                "UPDATE tasks SET title=?2, description=?3, status=?4, priority=?5, \
+                 assigned_role=?6, assigned_agent_id=?7, output_path=?8, tags=?9, \
+                 branch_name=?10, base_branch=?11, latest_commit=?12, pr_url=?13, \
+                 worktree_path=?14, updated_at=?1 WHERE id=?15",
+                params![
+                    now, new_title, new_description, new_status, new_priority,
+                    new_assigned_role, new_assigned_agent_id, new_output_path, tags_json,
+                    new_branch_name, new_base_branch, new_latest_commit, new_pr_url,
+                    new_worktree_path, id
+                ],
             )?;
 
             Ok(Some(Task {
@@ -309,6 +456,12 @@ impl Database {
                 updated_at: now,
                 output_path: new_output_path,
                 tags: new_tags,
+                branch_name: new_branch_name,
+                base_branch: new_base_branch,
+                latest_commit: new_latest_commit,
+                commit_count: existing.commit_count,
+                pr_url: new_pr_url,
+                worktree_path: new_worktree_path,
             }))
         }).await
     }
@@ -324,7 +477,8 @@ impl Database {
     pub async fn list_activity(&self, limit: i64) -> Result<Vec<ActivityEntry>, tokio_rusqlite::Error> {
         self.conn.call(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, task_id, agent_id, agent_role, action, detail, timestamp FROM activity_log ORDER BY timestamp DESC LIMIT ?1"
+                "SELECT id, task_id, agent_id, agent_role, action, detail, timestamp \
+                 FROM activity_log ORDER BY timestamp DESC LIMIT ?1"
             )?;
             let entries = stmt.query_map(params![limit], |row| Ok(ActivityEntry {
                 id: row.get(0)?,
@@ -359,7 +513,8 @@ impl Database {
         let e = entry.clone();
         self.conn.call(move |conn| {
             conn.execute(
-                "INSERT INTO activity_log (id, task_id, agent_id, agent_role, action, detail, timestamp) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                "INSERT INTO activity_log (id, task_id, agent_id, agent_role, action, detail, timestamp) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7)",
                 params![e.id, e.task_id, e.agent_id, e.agent_role, e.action, e.detail, e.timestamp],
             )?;
             Ok(())
@@ -423,16 +578,18 @@ impl Database {
         let role = role.to_string();
 
         let target_status = match role.as_str() {
-            "coder" => "backlog",
-            "reviewer" => "in_review",
-            "tester" => "testing",
+            "coder"       => "backlog",
+            "reviewer"    => "in_review",
+            "tester"      => "testing",
             "docs_writer" => "docs_needed",
             _ => return Ok(None),
         }.to_string();
 
         self.conn.call(move |conn| {
             let task_id: Option<String> = conn.query_row(
-                "SELECT id FROM tasks WHERE status = ?1 AND (assigned_agent_id IS NULL OR assigned_agent_id = '') ORDER BY CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END, created_at ASC LIMIT 1",
+                "SELECT id FROM tasks WHERE status = ?1 AND (assigned_agent_id IS NULL OR assigned_agent_id = '') \
+                 ORDER BY CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END, \
+                 created_at ASC LIMIT 1",
                 params![target_status],
                 |row| row.get(0),
             ).optional()?;
@@ -451,11 +608,12 @@ impl Database {
                     )?;
                     let aid = Uuid::new_v4().to_string();
                     conn.execute(
-                        "INSERT INTO activity_log (id, task_id, agent_id, agent_role, action, detail, timestamp) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                        "INSERT INTO activity_log (id, task_id, agent_id, agent_role, action, detail, timestamp) \
+                         VALUES (?1,?2,?3,?4,?5,?6,?7)",
                         params![aid, tid, agent_id, role, "claimed", format!("Claimed by {}", agent_id), now],
                     )?;
                     let task = conn.query_row(
-                        "SELECT id, title, description, status, assigned_role, assigned_agent_id, priority, created_at, updated_at, output_path, tags FROM tasks WHERE id = ?1",
+                        &format!("{} WHERE id = ?1", TASK_SELECT),
                         params![tid],
                         row_to_task,
                     ).optional()?;
@@ -468,21 +626,20 @@ impl Database {
     pub async fn get_stats(&self) -> Result<Stats, tokio_rusqlite::Error> {
         self.conn.call(|conn| {
             let total: i64 = conn.query_row("SELECT COUNT(*) FROM tasks", [], |row| row.get(0))?;
-
             let mut by_status = std::collections::HashMap::new();
             let mut stmt = conn.prepare("SELECT status, COUNT(*) FROM tasks GROUP BY status")?;
             for row in stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))? {
                 let (s, c) = row?;
                 by_status.insert(s, c);
             }
-
             let mut by_role = std::collections::HashMap::new();
-            let mut stmt = conn.prepare("SELECT assigned_role, COUNT(*) FROM tasks WHERE assigned_role IS NOT NULL GROUP BY assigned_role")?;
+            let mut stmt = conn.prepare(
+                "SELECT assigned_role, COUNT(*) FROM tasks WHERE assigned_role IS NOT NULL GROUP BY assigned_role"
+            )?;
             for row in stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))? {
                 let (r, c) = row?;
                 by_role.insert(r, c);
             }
-
             Ok(Stats { total, by_status, by_role })
         }).await
     }

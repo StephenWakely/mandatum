@@ -14,7 +14,23 @@ export interface Task {
   updated_at: string
   output_path?: string
   tags: string[]
+  // git
+  branch_name?: string
+  base_branch: string
+  latest_commit?: string
+  commit_count: number
+  pr_url?: string
+  worktree_path?: string
   activity?: ActivityEntry[]
+}
+
+export interface Commit {
+  id: string
+  task_id: string
+  agent_id?: string
+  hash: string
+  message: string
+  timestamp: string
 }
 
 export interface ActivityEntry {
@@ -39,3 +55,9 @@ export interface Stats {
   by_status: Record<string, number>
   by_role: Record<string, number>
 }
+
+// Activity actions that are git-related
+export const GIT_ACTIONS = new Set([
+  'branch_created', 'committed', 'review_requested',
+  'approved', 'changes_requested', 'pr_opened', 'worktree_created',
+])

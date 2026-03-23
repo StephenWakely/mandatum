@@ -45,6 +45,7 @@ async fn main() {
     let rest = Router::new()
         .route("/api/tasks", get(list_tasks_handler).post(create_task_handler))
         .route("/api/tasks/:id", get(get_task_handler).patch(update_task_handler).delete(delete_task_handler))
+        .route("/api/tasks/:id/commits", get(list_commits_handler))
         .route("/api/activity", get(list_activity_handler))
         .route("/api/agents", get(list_agents_handler))
         .route("/api/stats", get(stats_handler))
@@ -137,6 +138,11 @@ struct UpdateTaskBody {
     assigned_agent_id: Option<String>,
     output_path: Option<String>,
     tags: Option<Vec<String>>,
+    branch_name: Option<String>,
+    base_branch: Option<String>,
+    latest_commit: Option<String>,
+    pr_url: Option<String>,
+    worktree_path: Option<String>,
 }
 
 async fn update_task_handler(
@@ -154,6 +160,11 @@ async fn update_task_handler(
         body.assigned_agent_id.as_deref(),
         body.output_path.as_deref(),
         body.tags.as_deref(),
+        body.branch_name.as_deref(),
+        body.base_branch.as_deref(),
+        body.latest_commit.as_deref(),
+        body.pr_url.as_deref(),
+        body.worktree_path.as_deref(),
     ).await {
         Ok(Some(task)) => {
             s.broadcaster.broadcast(
@@ -187,6 +198,16 @@ async fn list_activity_handler(State(s): State<Arc<AppState>>) -> impl IntoRespo
 async fn list_agents_handler(State(s): State<Arc<AppState>>) -> impl IntoResponse {
     match s.db.list_agents().await {
         Ok(agents) => Json(agents).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn list_commits_handler(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match s.db.list_commits_for_task(&id).await {
+        Ok(commits) => Json(commits).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }

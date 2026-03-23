@@ -95,6 +95,103 @@ To run the production binary:
 
 ---
 
+## Git Workflow
+
+Each task maps to a git branch. The full lifecycle:
+
+```
+backlog → [coder claims] → in_progress → [coder requests review] → in_review
+       → [reviewer approves] → testing → [tester passes] → docs_needed
+       → [docs writer] → done
+```
+
+### Step-by-step
+
+**Coder**
+```
+1. get_next_task          → returns task + suggested branch name
+2. setup_worktree         → records worktree path; returns git worktree add commands
+   git worktree add .worktrees/<branch> -b <branch>
+   cd .worktrees/<branch>
+   (OR: git checkout -b <branch> if working in a single checkout)
+3. create_branch          → records branch in tracker (if not using setup_worktree)
+4. ... write code ...
+5. git add . && git commit -m "feat: implement X"
+6. record_commit          → records hash + message in tracker
+7. (repeat 5–6 as needed)
+8. request_review         → moves to in_review, returns reviewer checkout commands
+9. set_pr_url             → optional, if you opened a GitHub/GitLab PR
+```
+
+**Reviewer**
+```
+1. get_next_task          → picks from in_review
+2. get_review_target      → returns branch name + all commits + git commands
+3. setup_worktree         → create an isolated worktree for reviewing
+   git worktree add .worktrees/<branch>-review <branch>
+   cd .worktrees/<branch>-review
+4. git diff main --stat   → inspect changes
+5. add_task_comment       → log review notes
+6. approve_review         → moves to testing
+   OR request_changes     → moves back to in_progress with feedback
+7. git worktree remove .worktrees/<branch>-review  → clean up when done
+```
+
+**Tester**
+```
+1. get_next_task          → picks from testing
+2. setup_worktree         → create isolated worktree for testing
+   git worktree add .worktrees/<branch>-test <branch>
+   cd .worktrees/<branch>-test
+3. ... run tests ...
+4. record_commit          → record any test commits
+5. update_task_status     → "docs_needed" (pass) or "in_progress" (fail with note)
+6. git worktree remove .worktrees/<branch>-test  → clean up when done
+```
+
+**Docs Writer**
+```
+1. get_next_task          → picks from docs_needed
+2. setup_worktree         → create isolated worktree for docs
+   git worktree add .worktrees/<branch>-docs <branch>
+   cd .worktrees/<branch>-docs
+3. ... write docs ...
+4. record_commit          → record docs commit
+5. set_output_path        → record docs file path
+6. update_task_status     → "done"
+7. git worktree remove .worktrees/<branch>-docs  → clean up when done
+```
+
+### Branch naming
+
+`get_next_task` suggests a branch name automatically:
+```
+feature/<first-8-chars-of-task-id>-<slugified-title>
+```
+e.g. `feature/a1b2c3d4-implement-user-authentication`
+
+### Git worktrees — multiple agents on the same machine
+
+Git worktrees let multiple agents work on different branches **simultaneously** from one repository clone. Each worktree is a separate directory with its own working tree and index, but they all share the same `.git` object store — so no duplication of history.
+
+```bash
+# Coder sets up their worktree
+git worktree add .worktrees/feature-a1b2c3d4-add-auth -b feature/a1b2c3d4-add-auth
+
+# Reviewer checks out concurrently in a separate worktree
+git worktree add .worktrees/feature-a1b2c3d4-add-auth-review feature/a1b2c3d4-add-auth
+
+# List all active worktrees
+git worktree list
+
+# Remove when done
+git worktree remove .worktrees/feature-a1b2c3d4-add-auth-review
+```
+
+The tracker records each agent's `worktree_path` so the UI shows exactly where each agent is working. Add `.worktrees/` to your `.gitignore`.
+
+---
+
 ## Connecting AI Agents via MCP
 
 ### MCP Configuration
@@ -223,8 +320,108 @@ Record the path of a file artifact produced for a task.
 Update `last_seen` timestamp. Call every few minutes to stay marked as active.
 
 ```json
+{ "agent_id": "coder-alpha" }
+```
+
+---
+
+### `create_branch`
+Record the git branch you created locally for a task.
+
+```json
 {
-  "agent_id": "coder-alpha"
+  "agent_id": "coder-alpha",
+  "task_id": "abc-123",
+  "branch_name": "feature/abc12345-add-auth",
+  "base_branch": "main"
+}
+```
+
+### `record_commit`
+Record a commit you made locally. Call after every `git commit`.
+
+```json
+{
+  "agent_id": "coder-alpha",
+  "task_id": "abc-123",
+  "hash": "a1b2c3d4e5f6",
+  "message": "feat: implement JWT authentication"
+}
+```
+
+### `request_review`
+Mark work done and move to `in_review`. Returns git checkout commands for the reviewer.
+
+```json
+{
+  "agent_id": "coder-alpha",
+  "task_id": "abc-123",
+  "commit_hash": "a1b2c3d4e5f6",
+  "note": "All tests passing, ready for review"
+}
+```
+
+### `get_review_target`
+Get the branch, commits, and ready-to-run git commands for reviewing a task.
+
+```json
+{ "task_id": "abc-123" }
+```
+
+### `approve_review`
+Approve the review — moves task to `testing`.
+
+```json
+{
+  "agent_id": "reviewer-prime",
+  "task_id": "abc-123",
+  "comment": "LGTM — clean implementation, good test coverage"
+}
+```
+
+### `request_changes`
+Request changes — moves task back to `in_progress` with feedback for the coder.
+
+```json
+{
+  "agent_id": "reviewer-prime",
+  "task_id": "abc-123",
+  "feedback": "Token expiry not handled — add refresh logic in auth.rs line 42"
+}
+```
+
+### `set_pr_url`
+Record a pull/merge request URL.
+
+```json
+{
+  "agent_id": "coder-alpha",
+  "task_id": "abc-123",
+  "pr_url": "https://github.com/org/repo/pull/42"
+}
+```
+
+### `setup_worktree`
+Record the git worktree path for a task. Returns the `git worktree add` commands to run. Use this instead of (or in addition to) `create_branch` when running multiple agents concurrently — each agent gets an isolated directory to work in.
+
+```json
+{
+  "agent_id": "coder-alpha",
+  "task_id": "abc-123",
+  "branch_name": "feature/abc12345-add-auth",
+  "worktree_path": ".worktrees/feature-abc12345-add-auth",
+  "base_branch": "main"
+}
+```
+
+Returns:
+```json
+{
+  "message": "Worktree recorded",
+  "setup_commands": [
+    "git worktree add .worktrees/feature-abc12345-add-auth -b feature/abc12345-add-auth",
+    "cd .worktrees/feature-abc12345-add-auth"
+  ]
 }
 ```
 
@@ -233,40 +430,50 @@ Update `last_seen` timestamp. Call every few minutes to stay marked as active.
 ## Agent System Prompts
 
 ### Coder Agent
-> You are a coding agent connected to a shared task tracker. At the start of each session:
+> You are a coding agent connected to a shared task tracker with git integration. At the start of each session:
 > 1. Call `register_agent` with your `agent_id` and `role: "coder"`
-> 2. Call `get_next_task` with `role: "coder"` to claim a task from the backlog
-> 3. Implement the task. Call `add_task_comment` to log progress notes
-> 4. When done, call `set_output_path` to record any files you produced
-> 5. Call `update_task_status` to move the task to `"in_review"`
-> 6. Repeat from step 2. Send a `heartbeat` every few minutes while working.
+> 2. Call `get_next_task` — returns a task and a suggested branch name
+> 3. Call `setup_worktree` with `branch_name` and `worktree_path` (e.g. `.worktrees/<branch>`) — it returns the exact `git worktree add` commands to run. This gives you an isolated working directory so other agents can work concurrently.
+> 4. Run the returned `git worktree add` commands, then `cd` into the worktree path
+> 5. Implement the task. After each `git commit`, call `record_commit` with the hash and message
+> 6. Call `set_output_path` to record the primary file(s) you produced
+> 7. Call `request_review` with your HEAD commit hash — moves the task to `in_review`
+> 8. Optionally call `set_pr_url` if you opened a pull request
+> 9. Repeat from step 2. Send a `heartbeat` every few minutes.
 
 ### Reviewer Agent
 > You are a code reviewer agent. At the start of each session:
 > 1. Call `register_agent` with your `agent_id` and `role: "reviewer"`
-> 2. Call `get_next_task` with `role: "reviewer"` to claim a task from `in_review`
-> 3. Review the code at the task's `output_path`. Log findings with `add_task_comment`
-> 4. If approved: call `update_task_status` to move to `"testing"`
-> 5. If changes needed: call `update_task_status` to move back to `"in_progress"` with a note
-> 6. Repeat. Send a `heartbeat` every few minutes.
+> 2. Call `get_next_task` — picks a task from `in_review`
+> 3. Call `get_review_target` to get the branch name, commit list, and ready-to-run git commands
+> 4. Call `setup_worktree` with `worktree_path: ".worktrees/<branch>-review"` to get an isolated checkout for reviewing — run the returned commands
+> 5. Inspect changes: `git diff main --stat` then `git diff main`
+> 6. Log findings with `add_task_comment`
+> 7. If approved: call `approve_review` — moves to `testing`
+> 8. If changes needed: call `request_changes` with specific feedback — moves back to `in_progress`
+> 9. Run `git worktree remove .worktrees/<branch>-review` to clean up. Repeat. Send a `heartbeat` every few minutes.
 
 ### Tester Agent
 > You are a QA testing agent. At the start of each session:
 > 1. Call `register_agent` with your `agent_id` and `role: "tester"`
-> 2. Call `get_next_task` with `role: "tester"` to claim a task from `testing`
-> 3. Write and run tests for the code at the task's `output_path`
-> 4. Call `set_output_path` to record your test file
-> 5. If tests pass: call `update_task_status` to move to `"docs_needed"`
-> 6. If tests fail: move back to `"in_progress"` with failure details
-> 7. Repeat. Send a `heartbeat` every few minutes.
+> 2. Call `get_next_task` — picks from `testing`
+> 3. Call `setup_worktree` with `worktree_path: ".worktrees/<branch>-test"` — run the returned commands to get an isolated checkout
+> 4. Write and run tests. Call `record_commit` for any test commits you make
+> 5. Call `set_output_path` to record your test file path
+> 6. If tests pass: call `update_task_status` → `"docs_needed"` with a summary
+> 7. If tests fail: call `update_task_status` → `"in_progress"` with failure details
+> 8. Run `git worktree remove .worktrees/<branch>-test` to clean up. Repeat. Send a `heartbeat` every few minutes.
 
 ### Docs Writer Agent
 > You are a technical documentation agent. At the start of each session:
 > 1. Call `register_agent` with your `agent_id` and `role: "docs_writer"`
-> 2. Call `get_next_task` with `role: "docs_writer"` to claim a task from `docs_needed`
-> 3. Write documentation for the feature. Call `set_output_path` to record the docs file
-> 4. Call `update_task_status` to move to `"done"` with a summary note
-> 5. Repeat. Send a `heartbeat` every few minutes.
+> 2. Call `get_next_task` — picks from `docs_needed`
+> 3. Call `setup_worktree` with `worktree_path: ".worktrees/<branch>-docs"` — run the returned commands to get an isolated checkout
+> 4. Write documentation for the feature on the same branch
+> 5. Call `record_commit` after committing the docs
+> 6. Call `set_output_path` to record the docs file path
+> 7. Call `update_task_status` → `"done"` with a summary note
+> 8. Run `git worktree remove .worktrees/<branch>-docs` to clean up. Repeat. Send a `heartbeat` every few minutes.
 
 ---
 

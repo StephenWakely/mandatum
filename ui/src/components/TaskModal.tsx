@@ -1,15 +1,29 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { fetchTask, updateTask, deleteTask } from '../api'
-import { Task, TaskStatus, TaskPriority, AgentRole } from '../types'
+import { fetchTask, fetchCommits, updateTask, deleteTask } from '../api'
+import { Task, TaskStatus, TaskPriority, AgentRole, GIT_ACTIONS } from '../types'
 import AgentBadge from './AgentBadge'
 import { PRIORITY_CONFIG } from './TaskCard'
 import { formatDistanceToNow } from 'date-fns'
-import { X, Copy, Pencil, Trash2, ChevronDown } from 'lucide-react'
+import { X, Copy, Pencil, Trash2, ChevronDown, GitBranch, GitCommit, ExternalLink, FolderOpen } from 'lucide-react'
 
 const STATUSES: TaskStatus[] = ['backlog', 'in_progress', 'in_review', 'testing', 'docs_needed', 'done', 'blocked']
 const PRIORITIES: TaskPriority[] = ['low', 'medium', 'high', 'critical']
 const ROLES: AgentRole[] = ['coder', 'reviewer', 'tester', 'docs_writer']
+
+const ACTION_ICON: Record<string, string> = {
+  branch_created:    '⎇',
+  committed:         '●',
+  review_requested:  '⇒',
+  approved:          '✓',
+  changes_requested: '✗',
+  pr_opened:         '↑',
+  worktree_created:  '⊞',
+}
+
+function copyToClipboard(text: string) {
+  navigator.clipboard.writeText(text)
+}
 
 interface TaskModalProps {
   task: Task
@@ -31,6 +45,11 @@ export default function TaskModal({ task: initialTask, onClose }: TaskModalProps
   const { data: task = initialTask } = useQuery({
     queryKey: ['task', initialTask.id],
     queryFn: () => fetchTask(initialTask.id),
+  })
+
+  const { data: commits = [] } = useQuery({
+    queryKey: ['commits', initialTask.id],
+    queryFn: () => fetchCommits(initialTask.id),
   })
 
   const updateMutation = useMutation({
@@ -74,15 +93,12 @@ export default function TaskModal({ task: initialTask, onClose }: TaskModalProps
       className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4"
       onClick={e => e.target === e.currentTarget && onClose()}
     >
-      <div className="bg-slate-900 border border-slate-700 rounded-xl w-full max-w-2xl max-h-[85vh] flex flex-col shadow-2xl">
+      <div className="bg-slate-900 border border-slate-700 rounded-xl w-full max-w-2xl max-h-[90vh] flex flex-col shadow-2xl">
         {/* Header */}
         <div className="flex items-start justify-between p-5 border-b border-slate-800">
           {editing ? (
-            <input
-              value={editForm.title}
-              onChange={e => setEditForm(f => ({ ...f, title: e.target.value }))}
-              className="flex-1 bg-slate-800 border border-slate-600 rounded-lg px-3 py-1.5 text-white text-lg font-semibold mr-2 outline-none focus:border-indigo-500"
-            />
+            <input value={editForm.title} onChange={e => setEditForm(f => ({ ...f, title: e.target.value }))}
+              className="flex-1 bg-slate-800 border border-slate-600 rounded-lg px-3 py-1.5 text-white text-lg font-semibold mr-2 outline-none focus:border-indigo-500" />
           ) : (
             <h2 className="text-lg font-semibold text-white flex-1 mr-3 leading-snug">{task.title}</h2>
           )}
@@ -92,10 +108,8 @@ export default function TaskModal({ task: initialTask, onClose }: TaskModalProps
                 <Pencil className="w-4 h-4" />
               </button>
             )}
-            <button
-              onClick={() => { if (confirm('Delete this task?')) deleteMutation.mutate() }}
-              className="p-1.5 rounded-md text-slate-400 hover:text-red-400 hover:bg-slate-800 transition-colors"
-            >
+            <button onClick={() => { if (confirm('Delete this task?')) deleteMutation.mutate() }}
+              className="p-1.5 rounded-md text-slate-400 hover:text-red-400 hover:bg-slate-800 transition-colors">
               <Trash2 className="w-4 h-4" />
             </button>
             <button onClick={onClose} className="p-1.5 rounded-md text-slate-400 hover:text-white hover:bg-slate-800 transition-colors">
@@ -105,7 +119,7 @@ export default function TaskModal({ task: initialTask, onClose }: TaskModalProps
         </div>
 
         <div className="flex-1 overflow-y-auto">
-          <div className="p-5 space-y-4">
+          <div className="p-5 space-y-5">
             {/* Meta */}
             <div className="flex flex-wrap items-center gap-2">
               {editing ? (
@@ -180,28 +194,8 @@ export default function TaskModal({ task: initialTask, onClose }: TaskModalProps
               )}
             </div>
 
-            {task.assigned_agent_id && (
-              <div>
-                <label className="text-xs text-slate-500 uppercase font-medium block mb-1">Assigned Agent</label>
-                <p className="text-sm font-mono text-slate-300">{task.assigned_agent_id}</p>
-              </div>
-            )}
-
-            {task.output_path && (
-              <div>
-                <label className="text-xs text-slate-500 uppercase font-medium block mb-1">Output Path</label>
-                <div className="flex items-center gap-2 bg-slate-800 rounded-lg px-3 py-2">
-                  <code className="text-sm text-emerald-400 flex-1 font-mono truncate">{task.output_path}</code>
-                  <button onClick={() => navigator.clipboard.writeText(task.output_path!)}
-                    className="text-slate-500 hover:text-white transition-colors">
-                    <Copy className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              </div>
-            )}
-
             {editing && (
-              <div className="flex gap-2 pt-2">
+              <div className="flex gap-2">
                 <button onClick={handleSave} disabled={updateMutation.isPending}
                   className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50">
                   Save Changes
@@ -213,25 +207,146 @@ export default function TaskModal({ task: initialTask, onClose }: TaskModalProps
               </div>
             )}
 
+            {/* ── Git section ─────────────────────────────────────────── */}
+            <div className="border border-slate-800 rounded-lg overflow-hidden">
+              <div className="flex items-center gap-2 px-3 py-2 bg-slate-800/50 border-b border-slate-800">
+                <GitBranch className="w-3.5 h-3.5 text-slate-500" />
+                <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">Git</span>
+                {task.commit_count > 0 && (
+                  <span className="ml-auto text-xs text-slate-600 flex items-center gap-1">
+                    <GitCommit className="w-3 h-3" />{task.commit_count} commit{task.commit_count !== 1 ? 's' : ''}
+                  </span>
+                )}
+              </div>
+              <div className="p-3 space-y-3">
+                {/* Branch */}
+                {task.branch_name ? (
+                  <div className="flex items-center gap-2">
+                    <GitBranch className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                    <code className="text-sm text-emerald-400 font-mono flex-1 truncate">{task.branch_name}</code>
+                    <button onClick={() => copyToClipboard(task.branch_name!)}
+                      className="text-slate-600 hover:text-slate-300 transition-colors shrink-0">
+                      <Copy className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                ) : (
+                  <p className="text-xs text-slate-600 italic">No branch yet — agent should call <code className="text-slate-500">create_branch</code></p>
+                )}
+
+                {/* Base branch + diff command */}
+                {task.branch_name && (
+                  <div className="bg-slate-900 rounded-md px-3 py-2 text-xs font-mono text-slate-500 space-y-0.5">
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-600">$ git checkout {task.branch_name}</span>
+                      <button onClick={() => copyToClipboard(`git checkout ${task.branch_name}`)}
+                        className="text-slate-700 hover:text-slate-400 transition-colors ml-2 shrink-0">
+                        <Copy className="w-3 h-3" />
+                      </button>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-600">$ git diff {task.base_branch}</span>
+                      <button onClick={() => copyToClipboard(`git diff ${task.base_branch}`)}
+                        className="text-slate-700 hover:text-slate-400 transition-colors ml-2 shrink-0">
+                        <Copy className="w-3 h-3" />
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Latest commit */}
+                {task.latest_commit && (
+                  <div className="flex items-center gap-2">
+                    <GitCommit className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                    <code className="text-xs text-slate-400 font-mono">{task.latest_commit.slice(0, 12)}</code>
+                    <button onClick={() => copyToClipboard(task.latest_commit!)}
+                      className="text-slate-600 hover:text-slate-300 transition-colors">
+                      <Copy className="w-3 h-3" />
+                    </button>
+                  </div>
+                )}
+
+                {/* PR URL */}
+                {task.pr_url && (
+                  <div className="flex items-center gap-2">
+                    <ExternalLink className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                    <a href={task.pr_url} target="_blank" rel="noopener noreferrer"
+                      className="text-xs text-indigo-400 hover:text-indigo-300 underline truncate flex-1">
+                      {task.pr_url}
+                    </a>
+                  </div>
+                )}
+
+                {/* Worktree path */}
+                {task.worktree_path && (
+                  <div className="flex items-center gap-2">
+                    <FolderOpen className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                    <code className="text-xs text-amber-400 font-mono flex-1 truncate">{task.worktree_path}</code>
+                    <button onClick={() => copyToClipboard(task.worktree_path!)}
+                      className="text-slate-600 hover:text-slate-300 transition-colors shrink-0">
+                      <Copy className="w-3 h-3" />
+                    </button>
+                  </div>
+                )}
+
+                {/* Commits list */}
+                {commits.length > 0 && (
+                  <div className="space-y-1.5 border-t border-slate-800 pt-3 mt-1">
+                    <p className="text-xs text-slate-600 uppercase font-medium mb-2">Commits</p>
+                    {commits.map(c => (
+                      <div key={c.id} className="flex items-start gap-2 text-xs">
+                        <code className="text-slate-600 font-mono shrink-0 mt-0.5">{c.hash.slice(0, 8)}</code>
+                        <span className="text-slate-300 flex-1 leading-snug">{c.message}</span>
+                        <span className="text-slate-600 shrink-0">
+                          {formatDistanceToNow(new Date(c.timestamp), { addSuffix: true })}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Output path */}
+            {task.output_path && (
+              <div>
+                <label className="text-xs text-slate-500 uppercase font-medium block mb-1">Output Path</label>
+                <div className="flex items-center gap-2 bg-slate-800 rounded-lg px-3 py-2">
+                  <code className="text-sm text-emerald-400 flex-1 font-mono truncate">{task.output_path}</code>
+                  <button onClick={() => copyToClipboard(task.output_path!)}
+                    className="text-slate-500 hover:text-white transition-colors">
+                    <Copy className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* Activity log */}
             {task.activity && task.activity.length > 0 && (
               <div>
                 <label className="text-xs text-slate-500 uppercase font-medium block mb-2">Activity</label>
                 <div className="space-y-2">
-                  {task.activity.map(entry => (
-                    <div key={entry.id} className="flex gap-3 text-xs">
-                      <span className="text-slate-600 font-mono shrink-0 pt-0.5">
-                        {formatDistanceToNow(new Date(entry.timestamp), { addSuffix: true })}
-                      </span>
-                      <div>
-                        <span className="text-slate-400">{entry.agent_id ?? 'System'}</span>
-                        {entry.agent_role && <span className="text-slate-600 ml-1">({entry.agent_role})</span>}
-                        <span className="text-slate-500 mx-1">·</span>
-                        <span className="text-slate-300">{entry.action.replace(/_/g, ' ')}</span>
-                        {entry.detail && <p className="text-slate-500 mt-0.5">{entry.detail}</p>}
+                  {task.activity.map(entry => {
+                    const isGit = GIT_ACTIONS.has(entry.action)
+                    return (
+                      <div key={entry.id} className={`flex gap-3 text-xs rounded-md px-2 py-1.5 ${isGit ? 'bg-slate-800/60 border border-slate-800' : ''}`}>
+                        <span className={`shrink-0 w-4 text-center font-mono ${isGit ? 'text-emerald-600' : 'text-slate-700'}`}>
+                          {ACTION_ICON[entry.action] ?? '·'}
+                        </span>
+                        <span className="text-slate-600 font-mono shrink-0 pt-0.5">
+                          {formatDistanceToNow(new Date(entry.timestamp), { addSuffix: true })}
+                        </span>
+                        <div className="flex-1 min-w-0">
+                          <span className="text-slate-400">{entry.agent_id ?? 'System'}</span>
+                          {entry.agent_role && <span className="text-slate-600 ml-1">({entry.agent_role})</span>}
+                          <span className="text-slate-500 mx-1">·</span>
+                          <span className={`font-medium ${isGit ? 'text-emerald-400' : 'text-slate-300'}`}>
+                            {entry.action.replace(/_/g, ' ')}
+                          </span>
+                          {entry.detail && <p className="text-slate-500 mt-0.5 break-all">{entry.detail}</p>}
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    )
+                  })}
                 </div>
               </div>
             )}

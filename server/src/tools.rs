@@ -1,5 +1,5 @@
 use serde_json::Value;
-use crate::db::Database;
+use crate::db::{Database, suggest_branch};
 use crate::sse::SseBroadcaster;
 
 pub struct ToolContext {
@@ -13,24 +13,47 @@ pub async fn handle_tool_call(
     ctx: &ToolContext,
 ) -> Result<Value, String> {
     match name {
-        "register_agent" => register_agent(arguments, ctx).await,
-        "get_next_task" => get_next_task(arguments, ctx).await,
-        "update_task_status" => update_task_status(arguments, ctx).await,
-        "add_task_comment" => add_task_comment(arguments, ctx).await,
-        "create_task" => create_task(arguments, ctx).await,
-        "list_tasks" => list_tasks(arguments, ctx).await,
-        "get_task" => get_task(arguments, ctx).await,
-        "set_output_path" => set_output_path(arguments, ctx).await,
-        "heartbeat" => heartbeat(arguments, ctx).await,
+        "register_agent"    => register_agent(arguments, ctx).await,
+        "get_next_task"     => get_next_task(arguments, ctx).await,
+        "update_task_status"=> update_task_status(arguments, ctx).await,
+        "add_task_comment"  => add_task_comment(arguments, ctx).await,
+        "create_task"       => create_task(arguments, ctx).await,
+        "list_tasks"        => list_tasks(arguments, ctx).await,
+        "get_task"          => get_task(arguments, ctx).await,
+        "set_output_path"   => set_output_path(arguments, ctx).await,
+        "heartbeat"         => heartbeat(arguments, ctx).await,
+        // git tools
+        "create_branch"     => create_branch(arguments, ctx).await,
+        "record_commit"     => record_commit(arguments, ctx).await,
+        "request_review"    => request_review(arguments, ctx).await,
+        "get_review_target" => get_review_target(arguments, ctx).await,
+        "approve_review"    => approve_review(arguments, ctx).await,
+        "request_changes"   => request_changes(arguments, ctx).await,
+        "set_pr_url"        => set_pr_url(arguments, ctx).await,
+        "setup_worktree"    => setup_worktree(arguments, ctx).await,
         _ => Err(format!("Unknown tool: {}", name)),
     }
 }
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+async fn agent_role(db: &Database, agent_id: &str) -> Option<String> {
+    db.list_agents().await.ok()
+        .and_then(|agents| agents.into_iter().find(|a| a.agent_id == agent_id))
+        .map(|a| a.role)
+}
+
+fn broadcast(ctx: &ToolContext, event: &str, data: &serde_json::Value) {
+    ctx.broadcaster.broadcast(serde_json::json!({"event": event, "data": data}).to_string());
+}
+
+// ── original tools ────────────────────────────────────────────────────────────
 
 async fn register_agent(args: Value, ctx: &ToolContext) -> Result<Value, String> {
     let agent_id = args["agent_id"].as_str().ok_or("Missing agent_id")?;
     let role = args["role"].as_str().ok_or("Missing role")?;
     let agent = ctx.db.register_agent(agent_id, role).await.map_err(|e| e.to_string())?;
-    ctx.broadcaster.broadcast(serde_json::json!({"event":"agent_registered","data":agent}).to_string());
+    broadcast(ctx, "agent_registered", &serde_json::json!(agent));
     Ok(serde_json::json!({
         "message": format!("Agent '{}' registered with role '{}'", agent_id, role),
         "agent": agent
@@ -41,10 +64,26 @@ async fn get_next_task(args: Value, ctx: &ToolContext) -> Result<Value, String> 
     let agent_id = args["agent_id"].as_str().ok_or("Missing agent_id")?;
     let role = args["role"].as_str().ok_or("Missing role")?;
     match ctx.db.get_next_task_for_role(agent_id, role).await.map_err(|e| e.to_string())? {
-        None => Ok(serde_json::json!({"message": format!("No tasks available for role '{}'", role), "task": null})),
+        None => Ok(serde_json::json!({
+            "message": format!("No tasks available for role '{}'", role),
+            "task": null
+        })),
         Some(task) => {
-            ctx.broadcaster.broadcast(serde_json::json!({"event":"task_updated","data":task}).to_string());
-            Ok(serde_json::json!({"message":"Task assigned","task":task}))
+            let suggested_branch = suggest_branch(&task.id, &task.title);
+            broadcast(ctx, "task_updated", &serde_json::json!(task));
+            Ok(serde_json::json!({
+                "message": "Task assigned",
+                "task": task,
+                "git_instructions": {
+                    "suggested_branch": suggested_branch,
+                    "commands": [
+                        format!("git checkout -b {}", suggested_branch),
+                        format!("# Work on: {}", task.title),
+                        "# After changes: call record_commit with hash and message",
+                        "# When done: call request_review"
+                    ]
+                }
+            }))
         }
     }
 }
@@ -55,37 +94,33 @@ async fn update_task_status(args: Value, ctx: &ToolContext) -> Result<Value, Str
     let status = args["status"].as_str().ok_or("Missing status")?;
     let note = args["note"].as_str();
 
-    let task = ctx.db.update_task(task_id, None, None, Some(status), None, None, None, None, None)
-        .await.map_err(|e| e.to_string())?
+    let task = ctx.db.update_task(
+        task_id, None, None, Some(status), None, None, None, None, None,
+        None, None, None, None, None,
+    ).await.map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Task {} not found", task_id))?;
 
-    let agents = ctx.db.list_agents().await.map_err(|e| e.to_string())?;
-    let agent_role = agents.iter().find(|a| a.agent_id == agent_id).map(|a| a.role.as_str());
-    let detail = note
-        .map(|n| format!("Status → '{}': {}", status, n))
+    let role = agent_role(&ctx.db, agent_id).await;
+    let detail = note.map(|n| format!("Status → '{}': {}", status, n))
         .unwrap_or_else(|| format!("Status → '{}'", status));
 
-    let entry = ctx.db.add_activity(task_id, Some(agent_id), agent_role, "status_changed", Some(&detail))
+    let entry = ctx.db.add_activity(task_id, Some(agent_id), role.as_deref(), "status_changed", Some(&detail))
         .await.map_err(|e| e.to_string())?;
 
-    ctx.broadcaster.broadcast(serde_json::json!({"event":"task_updated","data":task}).to_string());
-    ctx.broadcaster.broadcast(serde_json::json!({"event":"activity_added","data":entry}).to_string());
-    Ok(serde_json::json!({"task":task}))
+    broadcast(ctx, "task_updated", &serde_json::json!(task));
+    broadcast(ctx, "activity_added", &serde_json::json!(entry));
+    Ok(serde_json::json!({"task": task}))
 }
 
 async fn add_task_comment(args: Value, ctx: &ToolContext) -> Result<Value, String> {
     let agent_id = args["agent_id"].as_str().ok_or("Missing agent_id")?;
     let task_id = args["task_id"].as_str().ok_or("Missing task_id")?;
     let comment = args["comment"].as_str().ok_or("Missing comment")?;
-
-    let agents = ctx.db.list_agents().await.map_err(|e| e.to_string())?;
-    let agent_role = agents.iter().find(|a| a.agent_id == agent_id).map(|a| a.role.as_str());
-
-    let entry = ctx.db.add_activity(task_id, Some(agent_id), agent_role, "comment", Some(comment))
+    let role = agent_role(&ctx.db, agent_id).await;
+    let entry = ctx.db.add_activity(task_id, Some(agent_id), role.as_deref(), "comment", Some(comment))
         .await.map_err(|e| e.to_string())?;
-
-    ctx.broadcaster.broadcast(serde_json::json!({"event":"activity_added","data":entry}).to_string());
-    Ok(serde_json::json!({"message":"Comment added","activity_id":entry.id}))
+    broadcast(ctx, "activity_added", &serde_json::json!(entry));
+    Ok(serde_json::json!({"message": "Comment added", "activity_id": entry.id}))
 }
 
 async fn create_task(args: Value, ctx: &ToolContext) -> Result<Value, String> {
@@ -100,9 +135,8 @@ async fn create_task(args: Value, ctx: &ToolContext) -> Result<Value, String> {
 
     let task = ctx.db.create_task(Some(agent_id), title, description, priority, assigned_role, &tags)
         .await.map_err(|e| e.to_string())?;
-
-    ctx.broadcaster.broadcast(serde_json::json!({"event":"task_created","data":task}).to_string());
-    Ok(serde_json::json!({"task":task}))
+    broadcast(ctx, "task_created", &serde_json::json!(task));
+    Ok(serde_json::json!({"task": task}))
 }
 
 async fn list_tasks(args: Value, ctx: &ToolContext) -> Result<Value, String> {
@@ -111,14 +145,14 @@ async fn list_tasks(args: Value, ctx: &ToolContext) -> Result<Value, String> {
     let assigned_agent_id = args["assigned_agent_id"].as_str().map(|s| s.to_string());
     let tasks = ctx.db.list_tasks(status, assigned_role, assigned_agent_id)
         .await.map_err(|e| e.to_string())?;
-    Ok(serde_json::json!({"tasks":tasks}))
+    Ok(serde_json::json!({"tasks": tasks}))
 }
 
 async fn get_task(args: Value, ctx: &ToolContext) -> Result<Value, String> {
     let task_id = args["task_id"].as_str().ok_or("Missing task_id")?;
     match ctx.db.get_task_with_activity(task_id).await.map_err(|e| e.to_string())? {
         None => Err(format!("Task {} not found", task_id)),
-        Some(task) => Ok(serde_json::json!({"task":task})),
+        Some(t) => Ok(serde_json::json!({"task": t})),
     }
 }
 
@@ -126,26 +160,244 @@ async fn set_output_path(args: Value, ctx: &ToolContext) -> Result<Value, String
     let agent_id = args["agent_id"].as_str().ok_or("Missing agent_id")?;
     let task_id = args["task_id"].as_str().ok_or("Missing task_id")?;
     let output_path = args["output_path"].as_str().ok_or("Missing output_path")?;
-
-    let task = ctx.db.update_task(task_id, None, None, None, None, None, None, Some(output_path), None)
-        .await.map_err(|e| e.to_string())?
+    let task = ctx.db.update_task(
+        task_id, None, None, None, None, None, None, Some(output_path), None,
+        None, None, None, None, None,
+    ).await.map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Task {} not found", task_id))?;
-
-    let agents = ctx.db.list_agents().await.map_err(|e| e.to_string())?;
-    let agent_role = agents.iter().find(|a| a.agent_id == agent_id).map(|a| a.role.as_str());
-
-    ctx.db.add_activity(task_id, Some(agent_id), agent_role, "output_set", Some(&format!("Output: {}", output_path)))
-        .await.map_err(|e| e.to_string())?;
-
-    ctx.broadcaster.broadcast(serde_json::json!({"event":"task_updated","data":task}).to_string());
-    Ok(serde_json::json!({"task":task}))
+    let role = agent_role(&ctx.db, agent_id).await;
+    ctx.db.add_activity(task_id, Some(agent_id), role.as_deref(), "output_set",
+        Some(&format!("Output: {}", output_path))).await.map_err(|e| e.to_string())?;
+    broadcast(ctx, "task_updated", &serde_json::json!(task));
+    Ok(serde_json::json!({"task": task}))
 }
 
 async fn heartbeat(args: Value, ctx: &ToolContext) -> Result<Value, String> {
     let agent_id = args["agent_id"].as_str().ok_or("Missing agent_id")?;
     let ts = ctx.db.heartbeat(agent_id).await.map_err(|e| e.to_string())?;
-    Ok(serde_json::json!({"message":"Heartbeat received","agent_id":agent_id,"timestamp":ts}))
+    Ok(serde_json::json!({"message": "Heartbeat received", "agent_id": agent_id, "timestamp": ts}))
 }
+
+// ── git tools ─────────────────────────────────────────────────────────────────
+
+/// Agent declares the branch it created locally.
+async fn create_branch(args: Value, ctx: &ToolContext) -> Result<Value, String> {
+    let agent_id = args["agent_id"].as_str().ok_or("Missing agent_id")?;
+    let task_id = args["task_id"].as_str().ok_or("Missing task_id")?;
+    let branch_name = args["branch_name"].as_str().ok_or("Missing branch_name")?;
+    let base_branch = args["base_branch"].as_str().unwrap_or("main");
+
+    let task = ctx.db.update_task(
+        task_id, None, None, None, None, None, None, None, None,
+        Some(branch_name), Some(base_branch), None, None, None,
+    ).await.map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Task {} not found", task_id))?;
+
+    let role = agent_role(&ctx.db, agent_id).await;
+    let entry = ctx.db.add_activity(task_id, Some(agent_id), role.as_deref(), "branch_created",
+        Some(&format!("Branch: {} (base: {})", branch_name, base_branch)))
+        .await.map_err(|e| e.to_string())?;
+
+    broadcast(ctx, "task_updated", &serde_json::json!(task));
+    broadcast(ctx, "activity_added", &serde_json::json!(entry));
+    Ok(serde_json::json!({
+        "message": format!("Branch '{}' recorded for task", branch_name),
+        "task": task
+    }))
+}
+
+/// Agent records a git commit it made locally.
+async fn record_commit(args: Value, ctx: &ToolContext) -> Result<Value, String> {
+    let agent_id = args["agent_id"].as_str().ok_or("Missing agent_id")?;
+    let task_id = args["task_id"].as_str().ok_or("Missing task_id")?;
+    let hash = args["hash"].as_str().ok_or("Missing hash")?;
+    let message = args["message"].as_str().ok_or("Missing message")?;
+
+    let commit = ctx.db.add_commit(task_id, Some(agent_id), hash, message)
+        .await.map_err(|e| e.to_string())?;
+
+    let role = agent_role(&ctx.db, agent_id).await;
+    let entry = ctx.db.add_activity(task_id, Some(agent_id), role.as_deref(), "committed",
+        Some(&format!("{} — {}", &hash[..hash.len().min(8)], message)))
+        .await.map_err(|e| e.to_string())?;
+
+    // re-fetch to get updated commit_count
+    let task = ctx.db.get_task(task_id).await.map_err(|e| e.to_string())?;
+    if let Some(ref t) = task {
+        broadcast(ctx, "task_updated", &serde_json::json!(t));
+    }
+    broadcast(ctx, "activity_added", &serde_json::json!(entry));
+    Ok(serde_json::json!({"message": "Commit recorded", "commit": commit}))
+}
+
+/// Move task to in_review, recording the commit that's ready for review.
+async fn request_review(args: Value, ctx: &ToolContext) -> Result<Value, String> {
+    let agent_id = args["agent_id"].as_str().ok_or("Missing agent_id")?;
+    let task_id = args["task_id"].as_str().ok_or("Missing task_id")?;
+    let commit_hash = args["commit_hash"].as_str();
+    let note = args["note"].as_str().unwrap_or("Ready for review");
+
+    let task = ctx.db.update_task(
+        task_id, None, None, Some("in_review"), None, None, None, None, None,
+        None, None, commit_hash, None, None,
+    ).await.map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Task {} not found", task_id))?;
+
+    let role = agent_role(&ctx.db, agent_id).await;
+    let detail = match commit_hash {
+        Some(h) => format!("{} (commit: {})", note, &h[..h.len().min(8)]),
+        None => note.to_string(),
+    };
+    let entry = ctx.db.add_activity(task_id, Some(agent_id), role.as_deref(), "review_requested",
+        Some(&detail)).await.map_err(|e| e.to_string())?;
+
+    broadcast(ctx, "task_updated", &serde_json::json!(task));
+    broadcast(ctx, "activity_added", &serde_json::json!(entry));
+    Ok(serde_json::json!({
+        "message": "Task moved to in_review",
+        "task": task,
+        "reviewer_instructions": {
+            "branch": task.branch_name,
+            "commands": task.branch_name.as_ref().map(|b| vec![
+                format!("git fetch origin"),
+                format!("git checkout {}", b),
+                format!("git log {}..HEAD --oneline", task.base_branch),
+                format!("git diff {}", task.base_branch),
+            ]).unwrap_or_default()
+        }
+    }))
+}
+
+/// Get the branch and commit info a reviewer needs to check out.
+async fn get_review_target(args: Value, ctx: &ToolContext) -> Result<Value, String> {
+    let task_id = args["task_id"].as_str().ok_or("Missing task_id")?;
+    let task = ctx.db.get_task_with_activity(task_id).await.map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Task {} not found", task_id))?;
+
+    let commands: Vec<String> = if let Some(ref branch) = task.task.branch_name {
+        vec![
+            "git fetch origin".to_string(),
+            format!("git checkout {}", branch),
+            format!("git log {}..HEAD --oneline", task.task.base_branch),
+            format!("git diff {} --stat", task.task.base_branch),
+            format!("git diff {}", task.task.base_branch),
+        ]
+    } else {
+        vec!["# No branch recorded yet".to_string()]
+    };
+
+    Ok(serde_json::json!({
+        "task": task,
+        "review_target": {
+            "branch": task.task.branch_name,
+            "base_branch": task.task.base_branch,
+            "latest_commit": task.task.latest_commit,
+            "commit_count": task.task.commit_count,
+            "commits": task.commits,
+            "commands": commands
+        }
+    }))
+}
+
+/// Reviewer approves — moves to testing.
+async fn approve_review(args: Value, ctx: &ToolContext) -> Result<Value, String> {
+    let agent_id = args["agent_id"].as_str().ok_or("Missing agent_id")?;
+    let task_id = args["task_id"].as_str().ok_or("Missing task_id")?;
+    let comment = args["comment"].as_str().unwrap_or("LGTM");
+
+    let task = ctx.db.update_task(
+        task_id, None, None, Some("testing"), None, None, None, None, None,
+        None, None, None, None, None,
+    ).await.map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Task {} not found", task_id))?;
+
+    let role = agent_role(&ctx.db, agent_id).await;
+    let entry = ctx.db.add_activity(task_id, Some(agent_id), role.as_deref(), "approved",
+        Some(comment)).await.map_err(|e| e.to_string())?;
+
+    broadcast(ctx, "task_updated", &serde_json::json!(task));
+    broadcast(ctx, "activity_added", &serde_json::json!(entry));
+    Ok(serde_json::json!({"message": "Review approved, task moved to testing", "task": task}))
+}
+
+/// Reviewer requests changes — moves back to in_progress.
+async fn request_changes(args: Value, ctx: &ToolContext) -> Result<Value, String> {
+    let agent_id = args["agent_id"].as_str().ok_or("Missing agent_id")?;
+    let task_id = args["task_id"].as_str().ok_or("Missing task_id")?;
+    let feedback = args["feedback"].as_str().ok_or("Missing feedback")?;
+
+    let task = ctx.db.update_task(
+        task_id, None, None, Some("in_progress"), None, None, None, None, None,
+        None, None, None, None, None,
+    ).await.map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Task {} not found", task_id))?;
+
+    let role = agent_role(&ctx.db, agent_id).await;
+    let entry = ctx.db.add_activity(task_id, Some(agent_id), role.as_deref(), "changes_requested",
+        Some(feedback)).await.map_err(|e| e.to_string())?;
+
+    broadcast(ctx, "task_updated", &serde_json::json!(task));
+    broadcast(ctx, "activity_added", &serde_json::json!(entry));
+    Ok(serde_json::json!({
+        "message": "Changes requested, task moved back to in_progress",
+        "task": task,
+        "feedback": feedback
+    }))
+}
+
+/// Record the worktree path an agent is using for isolated checkout.
+async fn setup_worktree(args: Value, ctx: &ToolContext) -> Result<Value, String> {
+    let agent_id = args["agent_id"].as_str().ok_or("Missing agent_id")?;
+    let task_id = args["task_id"].as_str().ok_or("Missing task_id")?;
+    let branch_name = args["branch_name"].as_str().ok_or("Missing branch_name")?;
+    let worktree_path = args["worktree_path"].as_str().ok_or("Missing worktree_path")?;
+    let base_branch = args["base_branch"].as_str().unwrap_or("main");
+
+    let task = ctx.db.update_task(
+        task_id, None, None, None, None, None, None, None, None,
+        Some(branch_name), Some(base_branch), None, None, Some(worktree_path),
+    ).await.map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Task {} not found", task_id))?;
+
+    let role = agent_role(&ctx.db, agent_id).await;
+    let entry = ctx.db.add_activity(task_id, Some(agent_id), role.as_deref(), "worktree_created",
+        Some(&format!("Worktree: {} (branch: {})", worktree_path, branch_name)))
+        .await.map_err(|e| e.to_string())?;
+
+    broadcast(ctx, "task_updated", &serde_json::json!(task));
+    broadcast(ctx, "activity_added", &serde_json::json!(entry));
+    Ok(serde_json::json!({
+        "message": "Worktree recorded",
+        "task": task,
+        "setup_commands": [
+            format!("git worktree add {} -b {}", worktree_path, branch_name),
+            format!("cd {}", worktree_path),
+        ]
+    }))
+}
+
+/// Record a PR/MR URL for a task.
+async fn set_pr_url(args: Value, ctx: &ToolContext) -> Result<Value, String> {
+    let agent_id = args["agent_id"].as_str().ok_or("Missing agent_id")?;
+    let task_id = args["task_id"].as_str().ok_or("Missing task_id")?;
+    let pr_url = args["pr_url"].as_str().ok_or("Missing pr_url")?;
+
+    let task = ctx.db.update_task(
+        task_id, None, None, None, None, None, None, None, None,
+        None, None, None, Some(pr_url), None,
+    ).await.map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Task {} not found", task_id))?;
+
+    let role = agent_role(&ctx.db, agent_id).await;
+    let entry = ctx.db.add_activity(task_id, Some(agent_id), role.as_deref(), "pr_opened",
+        Some(pr_url)).await.map_err(|e| e.to_string())?;
+
+    broadcast(ctx, "task_updated", &serde_json::json!(task));
+    broadcast(ctx, "activity_added", &serde_json::json!(entry));
+    Ok(serde_json::json!({"message": "PR URL recorded", "task": task}))
+}
+
+// ── tool definitions ──────────────────────────────────────────────────────────
 
 pub fn tool_definitions() -> serde_json::Value {
     serde_json::json!([
@@ -155,22 +407,114 @@ pub fn tool_definitions() -> serde_json::Value {
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "agent_id": {"type": "string", "description": "Unique identifier for this agent instance"},
-                    "role": {"type": "string", "enum": ["coder", "reviewer", "tester", "docs_writer"]}
+                    "agent_id": {"type": "string"},
+                    "role": {"type": "string", "enum": ["coder","reviewer","tester","docs_writer"]}
                 },
-                "required": ["agent_id", "role"]
+                "required": ["agent_id","role"]
             }
         },
         {
             "name": "get_next_task",
-            "description": "Get the next available task for the agent's role and claim it.",
+            "description": "Claim the next available task for your role. Returns the task plus git branch instructions.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "agent_id": {"type": "string"},
-                    "role": {"type": "string", "enum": ["coder", "reviewer", "tester", "docs_writer"]}
+                    "role": {"type": "string", "enum": ["coder","reviewer","tester","docs_writer"]}
                 },
-                "required": ["agent_id", "role"]
+                "required": ["agent_id","role"]
+            }
+        },
+        {
+            "name": "create_branch",
+            "description": "Record the git branch you created locally for this task.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agent_id": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "branch_name": {"type": "string", "description": "e.g. feature/abc12345-add-auth"},
+                    "base_branch": {"type": "string", "description": "Base branch (default: main)"}
+                },
+                "required": ["agent_id","task_id","branch_name"]
+            }
+        },
+        {
+            "name": "record_commit",
+            "description": "Record a git commit you made locally. Call this after each `git commit`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agent_id": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "hash": {"type": "string", "description": "Full or short commit hash from `git rev-parse HEAD`"},
+                    "message": {"type": "string", "description": "Commit message"}
+                },
+                "required": ["agent_id","task_id","hash","message"]
+            }
+        },
+        {
+            "name": "request_review",
+            "description": "Mark work complete and move the task to in_review. Returns git commands for the reviewer.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agent_id": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "commit_hash": {"type": "string", "description": "The HEAD commit hash being submitted for review"},
+                    "note": {"type": "string"}
+                },
+                "required": ["agent_id","task_id"]
+            }
+        },
+        {
+            "name": "get_review_target",
+            "description": "Get the branch, commits, and git commands needed to review a task.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"}
+                },
+                "required": ["task_id"]
+            }
+        },
+        {
+            "name": "approve_review",
+            "description": "Approve the review — moves task to testing.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agent_id": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "comment": {"type": "string"}
+                },
+                "required": ["agent_id","task_id"]
+            }
+        },
+        {
+            "name": "request_changes",
+            "description": "Request changes from the coder — moves task back to in_progress.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agent_id": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "feedback": {"type": "string", "description": "Specific feedback on what needs to change"}
+                },
+                "required": ["agent_id","task_id","feedback"]
+            }
+        },
+        {
+            "name": "set_pr_url",
+            "description": "Record a pull/merge request URL for the task.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agent_id": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "pr_url": {"type": "string"}
+                },
+                "required": ["agent_id","task_id","pr_url"]
             }
         },
         {
@@ -184,7 +528,7 @@ pub fn tool_definitions() -> serde_json::Value {
                     "status": {"type": "string", "enum": ["backlog","in_progress","in_review","testing","docs_needed","done","blocked"]},
                     "note": {"type": "string"}
                 },
-                "required": ["agent_id", "task_id", "status"]
+                "required": ["agent_id","task_id","status"]
             }
         },
         {
@@ -197,7 +541,7 @@ pub fn tool_definitions() -> serde_json::Value {
                     "task_id": {"type": "string"},
                     "comment": {"type": "string"}
                 },
-                "required": ["agent_id", "task_id", "comment"]
+                "required": ["agent_id","task_id","comment"]
             }
         },
         {
@@ -213,7 +557,7 @@ pub fn tool_definitions() -> serde_json::Value {
                     "assigned_role": {"type": "string", "enum": ["coder","reviewer","tester","docs_writer"]},
                     "tags": {"type": "array", "items": {"type": "string"}}
                 },
-                "required": ["agent_id", "title"]
+                "required": ["agent_id","title"]
             }
         },
         {
@@ -230,7 +574,7 @@ pub fn tool_definitions() -> serde_json::Value {
         },
         {
             "name": "get_task",
-            "description": "Get full details of a task including its activity log.",
+            "description": "Get full details of a task including activity log and commits.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -249,7 +593,7 @@ pub fn tool_definitions() -> serde_json::Value {
                     "task_id": {"type": "string"},
                     "output_path": {"type": "string"}
                 },
-                "required": ["agent_id", "task_id", "output_path"]
+                "required": ["agent_id","task_id","output_path"]
             }
         },
         {
@@ -261,6 +605,21 @@ pub fn tool_definitions() -> serde_json::Value {
                     "agent_id": {"type": "string"}
                 },
                 "required": ["agent_id"]
+            }
+        },
+        {
+            "name": "setup_worktree",
+            "description": "Record a git worktree path for this task so multiple agents can work on separate branches simultaneously. Returns the `git worktree add` commands to run.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "agent_id": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "branch_name": {"type": "string", "description": "Branch name for this worktree"},
+                    "worktree_path": {"type": "string", "description": "Path for the worktree, e.g. .worktrees/feature-abc"},
+                    "base_branch": {"type": "string", "description": "Base branch (default: main)"}
+                },
+                "required": ["agent_id","task_id","branch_name","worktree_path"]
             }
         }
     ])
