@@ -587,10 +587,13 @@ impl Database {
 
         self.conn.call(move |conn| {
             let task_id: Option<String> = conn.query_row(
-                "SELECT id FROM tasks WHERE status = ?1 AND (assigned_agent_id IS NULL OR assigned_agent_id = '') \
+                "SELECT id FROM tasks \
+                 WHERE status = ?1 \
+                 AND (assigned_agent_id IS NULL OR assigned_agent_id = '') \
+                 AND (assigned_role IS NULL OR assigned_role = '' OR assigned_role = ?2) \
                  ORDER BY CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END, \
                  created_at ASC LIMIT 1",
-                params![target_status],
+                params![target_status, role],
                 |row| row.get(0),
             ).optional()?;
 
