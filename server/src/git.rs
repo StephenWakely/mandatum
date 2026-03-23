@@ -1,5 +1,6 @@
 use tokio::process::Command;
 use uuid::Uuid;
+use tracing::{info, warn};
 
 /// Merge `branch` into `base_branch` inside `repo_path` using a temporary
 /// worktree so the main working tree is never disturbed.
@@ -15,7 +16,10 @@ pub async fn merge_branch(
     let tmp = std::env::temp_dir().join(format!("mandatum-merge-{}", Uuid::new_v4()));
     let tmp_str = tmp.to_string_lossy().to_string();
 
+    info!(repo = repo_path, branch, base = base_branch, "merge: starting");
+
     // 1. Create a temporary worktree on base_branch
+    info!(worktree = %tmp_str, base = base_branch, "merge: creating temp worktree");
     let add = Command::new("git")
         .args(["-C", repo_path, "worktree", "add", &tmp_str, base_branch])
         .output()
@@ -23,13 +27,13 @@ pub async fn merge_branch(
         .map_err(|e| format!("git worktree add failed: {}", e))?;
 
     if !add.status.success() {
-        return Err(format!(
-            "git worktree add: {}",
-            String::from_utf8_lossy(&add.stderr).trim()
-        ));
+        let stderr = String::from_utf8_lossy(&add.stderr).trim().to_string();
+        warn!(error = %stderr, "merge: worktree add failed");
+        return Err(format!("git worktree add: {}", stderr));
     }
 
     // 2. Merge the feature branch (no-ff so there's always a merge commit)
+    info!(branch, base = base_branch, "merge: running git merge --no-ff");
     let merge = Command::new("git")
         .args(["-C", &tmp_str, "merge", "--no-ff", branch, "-m", message])
         .output()
@@ -37,16 +41,14 @@ pub async fn merge_branch(
         .map_err(|e| format!("git merge failed: {}", e))?;
 
     if !merge.status.success() {
-        // Abort the merge so the worktree is clean before we remove it
+        let stderr = String::from_utf8_lossy(&merge.stderr).trim().to_string();
+        warn!(branch, base = base_branch, error = %stderr, "merge: conflict or error, aborting");
         let _ = Command::new("git")
             .args(["-C", &tmp_str, "merge", "--abort"])
             .output()
             .await;
         let _ = cleanup_worktree(repo_path, &tmp_str).await;
-        return Err(format!(
-            "Merge conflict or error: {}",
-            String::from_utf8_lossy(&merge.stderr).trim()
-        ));
+        return Err(format!("Merge conflict or error: {}", stderr));
     }
 
     // 3. Capture the merge commit hash
@@ -57,8 +59,10 @@ pub async fn merge_branch(
         .map_err(|e| format!("git rev-parse failed: {}", e))?;
 
     let hash = String::from_utf8_lossy(&rev.stdout).trim().to_string();
+    info!(branch, base = base_branch, commit = %hash, "merge: success");
 
     // 4. Clean up
+    info!(worktree = %tmp_str, "merge: removing temp worktree");
     let _ = cleanup_worktree(repo_path, &tmp_str).await;
 
     Ok(hash)

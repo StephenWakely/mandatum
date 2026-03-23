@@ -1,6 +1,7 @@
 use serde_json::Value;
 use crate::db::{Database, suggest_branch};
 use crate::sse::SseBroadcaster;
+use tracing::{info, warn};
 
 pub struct ToolContext {
     pub db: Database,
@@ -53,6 +54,7 @@ fn broadcast(ctx: &ToolContext, event: &str, data: &serde_json::Value) {
 async fn register_agent(args: Value, ctx: &ToolContext) -> Result<Value, String> {
     let agent_id = args["agent_id"].as_str().ok_or("Missing agent_id")?;
     let role = args["role"].as_str().ok_or("Missing role")?;
+    info!(agent_id, role, "agent registered");
     let agent = ctx.db.register_agent(agent_id, role).await.map_err(|e| e.to_string())?;
     broadcast(ctx, "agent_registered", &serde_json::json!(agent));
     Ok(serde_json::json!({
@@ -65,11 +67,15 @@ async fn get_next_task(args: Value, ctx: &ToolContext) -> Result<Value, String> 
     let agent_id = args["agent_id"].as_str().ok_or("Missing agent_id")?;
     let role = args["role"].as_str().ok_or("Missing role")?;
     match ctx.db.get_next_task_for_role(agent_id, role).await.map_err(|e| e.to_string())? {
-        None => Ok(serde_json::json!({
-            "message": format!("No tasks available for role '{}'", role),
-            "task": null
-        })),
+        None => {
+            info!(agent_id, role, "get_next_task: no tasks available");
+            Ok(serde_json::json!({
+                "message": format!("No tasks available for role '{}'", role),
+                "task": null
+            }))
+        }
         Some(task) => {
+            info!(agent_id, role, task_id = %task.id, title = %task.title, "task assigned");
             let suggested_branch = suggest_branch(&task.id, &task.title);
             broadcast(ctx, "task_updated", &serde_json::json!(task));
             Ok(serde_json::json!({
@@ -101,6 +107,7 @@ async fn update_task_status(args: Value, ctx: &ToolContext) -> Result<Value, Str
     ).await.map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Task {} not found", task_id))?;
 
+    info!(agent_id, task_id, status, "task status updated");
     let role = agent_role(&ctx.db, agent_id).await;
     let detail = note.map(|n| format!("Status → '{}': {}", status, n))
         .unwrap_or_else(|| format!("Status → '{}'", status));
@@ -118,13 +125,13 @@ async fn update_task_status(args: Value, ctx: &ToolContext) -> Result<Value, Str
             let merge_msg = format!("Merge branch '{}' — task {} done", branch, task_id);
             match crate::git::merge_branch(repo_path, branch, &base, &merge_msg).await {
                 Ok(hash) => {
-                    tracing::info!("Auto-merged {} into {} ({})", branch, base, &hash[..hash.len().min(8)]);
+                    info!(branch, base, commit = &hash[..hash.len().min(8)], "auto-merge succeeded");
                     let _ = ctx.db.add_activity(task_id, Some(agent_id), role.as_deref(), "merged",
                         Some(&format!("Merged '{}' into '{}' ({})", branch, base, &hash[..hash.len().min(8)])))
                         .await;
                 }
                 Err(e) => {
-                    tracing::warn!("Auto-merge failed for task {}: {}", task_id, e);
+                    warn!(branch, base, task_id, error = %e, "auto-merge failed, task moved to blocked");
                     let _ = ctx.db.update_task(
                         task_id, None, None, Some("blocked"), None, None, None, None, None,
                         None, None, None, None, None,
@@ -226,6 +233,7 @@ async fn create_branch(args: Value, ctx: &ToolContext) -> Result<Value, String> 
     ).await.map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Task {} not found", task_id))?;
 
+    info!(agent_id, task_id, branch_name, base_branch, "branch created");
     let role = agent_role(&ctx.db, agent_id).await;
     let entry = ctx.db.add_activity(task_id, Some(agent_id), role.as_deref(), "branch_created",
         Some(&format!("Branch: {} (base: {})", branch_name, base_branch)))
@@ -249,6 +257,7 @@ async fn record_commit(args: Value, ctx: &ToolContext) -> Result<Value, String> 
     let commit = ctx.db.add_commit(task_id, Some(agent_id), hash, message)
         .await.map_err(|e| e.to_string())?;
 
+    info!(agent_id, task_id, hash, message, "commit recorded");
     let role = agent_role(&ctx.db, agent_id).await;
     let entry = ctx.db.add_activity(task_id, Some(agent_id), role.as_deref(), "committed",
         Some(&format!("{} — {}", &hash[..hash.len().min(8)], message)))
@@ -276,6 +285,7 @@ async fn request_review(args: Value, ctx: &ToolContext) -> Result<Value, String>
     ).await.map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Task {} not found", task_id))?;
 
+    info!(agent_id, task_id, commit = ?commit_hash, "review requested");
     let role = agent_role(&ctx.db, agent_id).await;
     let detail = match commit_hash {
         Some(h) => format!("{} (commit: {})", note, &h[..h.len().min(8)]),
