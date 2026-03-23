@@ -6,15 +6,15 @@ A self-contained task tracking system for coordinating AI agents. Exposes a full
 
 ```
 ┌─────────────┐     REST API      ┌──────────────────┐
-│  React UI   │ ◄─────────────── │   Rust Server    │
+│  React UI   │ ◄───────────────  │   Rust Server    │
 │  (port 5173)│     SSE events    │   (port 3001)    │
 └─────────────┘                   │                  │
                                   │   MCP / SSE      │
                     ┌─────────────►   (port 3002)    │
                     │             └────────┬─────────┘
-              AI Agents                   │
-         (Claude, etc.)             SQLite DB
-                                   (tasks.db)
+              AI Agents                    │
+         (Claude, etc.)                SQLite DB
+                                      (tasks.db)
 ```
 
 ## Prerequisites
@@ -177,14 +177,34 @@ make build
 
 Produces:
 - `server/target/release/mandatum-server` — standalone server binary
-- `ui/dist/` — static React app (serve with any HTTP server)
+- `ui/dist/` — static React app
 
-To run the production binary:
+### Single-process deployment (recommended)
+
+The server serves the React app directly — no separate web server needed:
 
 ```bash
-# From the repo root (so tasks.db is created here)
-./server/target/release/mandatum-server
+# Build everything and start as a single process
+make serve
+
+# Or manually:
+./server/target/release/mandatum-server --ui ui/dist
 ```
+
+Open **http://localhost:3001** — the same port serves both the API and the UI.
+
+The server auto-detects `ui/dist` if it exists in the current directory, so running `./mandatum-server` from the repo root after `make build` just works without `--ui`.
+
+### Custom paths and ports
+
+```bash
+./mandatum-server --ui /var/www/mandatum \
+                  --db /var/data/tasks.db \
+                  --rest-port 8080 \
+                  --mcp-port 8081
+```
+
+Run `./mandatum-server --help` for all options.
 
 ---
 

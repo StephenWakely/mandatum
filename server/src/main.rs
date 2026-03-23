@@ -13,6 +13,7 @@ use axum::{
 use serde::Deserialize;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
+use tower_http::services::{ServeDir, ServeFile};
 use tracing_subscriber::EnvFilter;
 
 use db::Database;
@@ -25,9 +26,10 @@ pub struct AppState {
 }
 
 struct Config {
-    db_path:  String,
+    db_path:   String,
     rest_port: u16,
     mcp_port:  u16,
+    ui_path:   Option<String>,
 }
 
 impl Config {
@@ -37,6 +39,7 @@ impl Config {
             db_path:   "tasks.db".to_string(),
             rest_port: 3001,
             mcp_port:  3002,
+            ui_path:   None,
         };
         let mut i = 1;
         while i < args.len() {
@@ -59,13 +62,20 @@ impl Config {
                         eprintln!("Error: --mcp-port requires a number"); std::process::exit(1)
                     });
                 }
+                "--ui" | "-u" => {
+                    i += 1;
+                    cfg.ui_path = Some(args.get(i).cloned().unwrap_or_else(|| {
+                        eprintln!("Error: --ui requires a path"); std::process::exit(1)
+                    }));
+                }
                 "--help" | "-h" => {
                     println!("Usage: mandatum-server [OPTIONS]");
                     println!();
                     println!("Options:");
-                    println!("  -d, --db <path>         SQLite database path  [default: tasks.db]");
-                    println!("  -r, --rest-port <port>  REST API port          [default: 3001]");
-                    println!("  -m, --mcp-port <port>   MCP/SSE port           [default: 3002]");
+                    println!("  -d, --db <path>         SQLite database path       [default: tasks.db]");
+                    println!("  -r, --rest-port <port>  REST API port               [default: 3001]");
+                    println!("  -m, --mcp-port <port>   MCP/SSE port                [default: 3002]");
+                    println!("  -u, --ui <path>         Serve React app from path   [default: ui/dist if it exists]");
                     println!("  -h, --help              Print this help");
                     std::process::exit(0);
                 }
@@ -76,6 +86,10 @@ impl Config {
                 }
             }
             i += 1;
+        }
+        // Default ui_path: serve ui/dist if it exists and --ui was not given
+        if cfg.ui_path.is_none() && std::path::Path::new("ui/dist").is_dir() {
+            cfg.ui_path = Some("ui/dist".to_string());
         }
         cfg
     }
@@ -101,7 +115,7 @@ async fn main() {
         .allow_methods([Method::GET, Method::POST, Method::PATCH, Method::DELETE, Method::OPTIONS])
         .allow_headers(Any);
 
-    let rest = Router::new()
+    let mut rest = Router::new()
         .route("/api/tasks", get(list_tasks_handler).post(create_task_handler))
         .route("/api/tasks/reap", axum::routing::post(reap_tasks_handler))
         .route("/api/tasks/:id", get(get_task_handler).patch(update_task_handler).delete(delete_task_handler))
@@ -110,9 +124,15 @@ async fn main() {
         .route("/api/activity", get(list_activity_handler))
         .route("/api/agents", get(list_agents_handler))
         .route("/api/stats", get(stats_handler))
-        .route("/events", get(sse::sse_handler))
-        .layer(cors.clone())
-        .with_state(state.clone());
+        .route("/events", get(sse::sse_handler));
+
+    if let Some(ref ui_path) = cfg.ui_path {
+        let index = format!("{}/index.html", ui_path);
+        let serve = ServeDir::new(ui_path).fallback(ServeFile::new(index));
+        rest = rest.fallback_service(serve);
+    }
+
+    let rest = rest.layer(cors.clone()).with_state(state.clone());
 
     // Background watchdog: reap stale tasks every 60 seconds
     let reap_state = state.clone();
@@ -136,6 +156,9 @@ async fn main() {
     tracing::info!("Database  → {}", cfg.db_path);
     tracing::info!("REST API  → http://0.0.0.0:{}", cfg.rest_port);
     tracing::info!("MCP/SSE   → http://0.0.0.0:{}/sse", cfg.mcp_port);
+    if let Some(ref p) = cfg.ui_path {
+        tracing::info!("React UI  → http://0.0.0.0:{} (serving {})", cfg.rest_port, p);
+    }
 
     let rest_listener = tokio::net::TcpListener::bind(("0.0.0.0", cfg.rest_port)).await.unwrap();
     let mcp_listener  = tokio::net::TcpListener::bind(("0.0.0.0", cfg.mcp_port)).await.unwrap();

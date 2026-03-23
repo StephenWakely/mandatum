@@ -1,4 +1,4 @@
-.PHONY: dev build seed clean agents
+.PHONY: dev build serve seed clean agents
 
 # Start both server and UI concurrently
 dev:
@@ -15,6 +15,11 @@ build:
 	@echo "Building React UI..."
 	cd ui && npm run build
 	@echo "Build complete."
+
+# Build everything and run as a single process (server serves the UI)
+serve: build
+	@echo "Starting Mandatum (single process, UI on :3001)..."
+	./server/target/release/mandatum-server --ui ui/dist
 
 # Insert sample tasks and agents into the DB
 seed:
