@@ -1,4 +1,4 @@
-.PHONY: dev build seed clean
+.PHONY: dev build seed clean agents
 
 # Start both server and UI concurrently
 dev:
@@ -21,6 +21,12 @@ seed:
 	@echo "Seeding database..."
 	@chmod +x server/seed.sh
 	@cd server && bash seed.sh
+
+# Run all four agent types in parallel (requires `claude` CLI on PATH)
+agents:
+	@echo "Starting all agents..."
+	@chmod +x agents/*.sh
+	@agents/run-all.sh
 
 # Clean build artifacts
 clean:
