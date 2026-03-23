@@ -5,7 +5,7 @@
 
 set -euo pipefail
 
-AGENT_ID="${1:-reviewer-$(hostname)-$$}"
+AGENT_ID="${AGENT_ID:-${1:-reviewer-$(hostname)-$$}}"
 PROJECT_DIR="${2:-${PROJECT_DIR:-$(pwd)}}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MCP_CONFIG="$SCRIPT_DIR/mcp-config.json"
