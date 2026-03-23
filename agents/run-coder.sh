@@ -1,25 +1,32 @@
 #!/usr/bin/env bash
 # Runs a coder agent in a continuous loop.
-# Usage: ./run-coder.sh [agent-id]
-#   agent-id defaults to coder-<hostname>-<pid>
+# Usage: ./run-coder.sh [agent-id] [project-dir]
+#   or:  PROJECT_DIR=/path/to/repo ./run-coder.sh [agent-id]
+#
+# project-dir is the git repo the agent works in (defaults to cwd).
+# The script itself can live anywhere — paths are resolved absolutely.
 
 set -euo pipefail
 
 AGENT_ID="${1:-coder-$(hostname)-$$}"
+PROJECT_DIR="${2:-${PROJECT_DIR:-$(pwd)}}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MCP_CONFIG="$SCRIPT_DIR/mcp-config.json"
+PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"   # resolve to absolute path
 
-echo "[coder] Starting agent: $AGENT_ID"
-echo "[coder] MCP config: $MCP_CONFIG"
+echo "[coder] Starting agent : $AGENT_ID"
+echo "[coder] Project dir    : $PROJECT_DIR"
+echo "[coder] MCP config     : $MCP_CONFIG"
 echo "[coder] Press Ctrl-C to stop."
 echo ""
 
 PROMPT="You are a coder agent. Your agent_id is \"$AGENT_ID\".
+You are working in the git repository at: $PROJECT_DIR
 
 Work through this loop continuously:
 1. Call register_agent with agent_id \"$AGENT_ID\" and role \"coder\"
 2. Call get_next_task — it returns a task and a suggested branch name
-3. Call setup_worktree with the suggested branch_name and worktree_path \".worktrees/\${branch_name}\" — run the returned git worktree add commands
+3. Call setup_worktree with the suggested branch_name and worktree_path \".worktrees/\${branch_name}\" — run the returned git worktree add commands inside $PROJECT_DIR
 4. Implement the task fully. After each git commit, call record_commit with the hash and message
 5. Call set_output_path to record the primary file(s) you produced
 6. Call request_review with your HEAD commit hash
@@ -29,6 +36,8 @@ Work through this loop continuously:
 If get_next_task returns no task, call heartbeat and wait 30 seconds before trying again.
 Always call heartbeat every 2 minutes while working.
 If a task has no branch yet and no worktree is appropriate, use create_branch instead."
+
+cd "$PROJECT_DIR"
 
 while true; do
   echo "[coder/$AGENT_ID] Starting task cycle at $(date '+%H:%M:%S')"

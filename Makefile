@@ -23,10 +23,14 @@ seed:
 	@cd server && bash seed.sh
 
 # Run all four agent types in parallel (requires `claude` CLI on PATH)
+# PROJECT_DIR defaults to cwd — set it to the repo the agents should work in:
+#   make agents PROJECT_DIR=/path/to/your/project
+#   make -C /path/to/mandatum agents PROJECT_DIR=/path/to/your/project
+PROJECT_DIR ?= $(shell pwd)
 agents:
-	@echo "Starting all agents..."
+	@echo "Starting all agents in $(PROJECT_DIR)..."
 	@chmod +x agents/*.sh
-	@agents/run-all.sh
+	@PROJECT_DIR="$(PROJECT_DIR)" agents/run-all.sh
 
 # Clean build artifacts
 clean:
