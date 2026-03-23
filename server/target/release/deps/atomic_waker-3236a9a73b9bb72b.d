@@ -1,0 +1,7 @@
+/home/stephenwakely/src/mandatum/server/target/release/deps/atomic_waker-3236a9a73b9bb72b.d: /home/stephenwakely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/atomic-waker-1.1.2/src/lib.rs
+
+/home/stephenwakely/src/mandatum/server/target/release/deps/libatomic_waker-3236a9a73b9bb72b.rlib: /home/stephenwakely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/atomic-waker-1.1.2/src/lib.rs
+
+/home/stephenwakely/src/mandatum/server/target/release/deps/libatomic_waker-3236a9a73b9bb72b.rmeta: /home/stephenwakely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/atomic-waker-1.1.2/src/lib.rs
+
+/home/stephenwakely/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/atomic-waker-1.1.2/src/lib.rs:
