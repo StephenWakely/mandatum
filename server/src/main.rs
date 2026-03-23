@@ -25,25 +25,28 @@ pub struct AppState {
     pub db: Database,
     pub broadcaster: SseBroadcaster,
     pub repo_path: Option<String>,
+    pub base_branch: String,
 }
 
 struct Config {
-    db_path:   String,
-    rest_port: u16,
-    mcp_port:  u16,
-    ui_path:   Option<String>,
-    repo_path: Option<String>,
+    db_path:     String,
+    rest_port:   u16,
+    mcp_port:    u16,
+    ui_path:     Option<String>,
+    repo_path:   Option<String>,
+    base_branch: String,
 }
 
 impl Config {
     fn from_args() -> Self {
         let args: Vec<String> = std::env::args().collect();
         let mut cfg = Config {
-            db_path:   "tasks.db".to_string(),
-            rest_port: 3001,
-            mcp_port:  3002,
-            ui_path:   None,
-            repo_path: None,
+            db_path:     "tasks.db".to_string(),
+            rest_port:   3001,
+            mcp_port:    3002,
+            ui_path:     None,
+            repo_path:   None,
+            base_branch: "master".to_string(),
         };
         let mut i = 1;
         while i < args.len() {
@@ -78,16 +81,23 @@ impl Config {
                         eprintln!("Error: --repo requires a path"); std::process::exit(1)
                     }));
                 }
+                "--base-branch" | "-b" => {
+                    i += 1;
+                    cfg.base_branch = args.get(i).cloned().unwrap_or_else(|| {
+                        eprintln!("Error: --base-branch requires a branch name"); std::process::exit(1)
+                    });
+                }
                 "--help" | "-h" => {
                     println!("Usage: mandatum-server [OPTIONS]");
                     println!();
                     println!("Options:");
-                    println!("  -d, --db <path>         SQLite database path       [default: tasks.db]");
-                    println!("  -r, --rest-port <port>  REST API port               [default: 3001]");
-                    println!("  -m, --mcp-port <port>   MCP/SSE port                [default: 3002]");
-                    println!("  -u, --ui <path>         Serve React app from path   [default: ui/dist if it exists]");
-                    println!("      --repo <path>        Git repo to auto-merge into on task done");
-                    println!("  -h, --help              Print this help");
+                    println!("  -d, --db <path>           SQLite database path       [default: tasks.db]");
+                    println!("  -r, --rest-port <port>    REST API port               [default: 3001]");
+                    println!("  -m, --mcp-port <port>     MCP/SSE port                [default: 3002]");
+                    println!("  -u, --ui <path>           Serve React app from path   [default: ui/dist if it exists]");
+                    println!("      --repo <path>          Git repo to auto-merge into on task done");
+                    println!("  -b, --base-branch <name>  Default branch to merge into [default: master]");
+                    println!("  -h, --help                Print this help");
                     std::process::exit(0);
                 }
                 unknown => {
@@ -119,7 +129,7 @@ async fn main() {
 
     let db = Database::new(&cfg.db_path).await.expect("Failed to open database");
     let broadcaster = SseBroadcaster::new();
-    let state = Arc::new(AppState { db, broadcaster, repo_path: cfg.repo_path.clone() });
+    let state = Arc::new(AppState { db, broadcaster, repo_path: cfg.repo_path.clone(), base_branch: cfg.base_branch.clone() });
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -171,11 +181,13 @@ async fn main() {
         tracing::info!("React UI  → http://0.0.0.0:{} (serving {})", cfg.rest_port, p);
     }
     if let Some(ref p) = cfg.repo_path {
-        tracing::info!("Auto-merge → enabled (repo: {})", p);
+        tracing::info!("Auto-merge → enabled (repo: {}, base: {})", p, cfg.base_branch);
     }
 
-    let rest_listener = tokio::net::TcpListener::bind(("0.0.0.0", cfg.rest_port)).await.unwrap();
-    let mcp_listener  = tokio::net::TcpListener::bind(("0.0.0.0", cfg.mcp_port)).await.unwrap();
+    let rest_listener = tokio::net::TcpListener::bind(("0.0.0.0", cfg.rest_port)).await
+        .unwrap_or_else(|e| { eprintln!("Error: cannot bind REST port {} — {}", cfg.rest_port, e); std::process::exit(1) });
+    let mcp_listener  = tokio::net::TcpListener::bind(("0.0.0.0", cfg.mcp_port)).await
+        .unwrap_or_else(|e| { eprintln!("Error: cannot bind MCP port {} — {}", cfg.mcp_port, e); std::process::exit(1) });
 
     let _ = tokio::join!(
         axum::serve(rest_listener, rest),
@@ -289,7 +301,7 @@ async fn update_task_handler(
             // Auto-merge when task is marked done via REST
             if body.status.as_deref() == Some("done") {
                 if let (Some(ref repo_path), Some(ref branch)) = (&s.repo_path, &task.branch_name) {
-                    let base = if task.base_branch.is_empty() { "main".to_string() } else { task.base_branch.clone() };
+                    let base = if task.base_branch.is_empty() { s.base_branch.clone() } else { task.base_branch.clone() };
                     let merge_msg = format!("Merge branch '{}' — task {} done", branch, id);
                     match git::merge_branch(repo_path, branch, &base, &merge_msg).await {
                         Ok(hash) => {

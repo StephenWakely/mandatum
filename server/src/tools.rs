@@ -7,6 +7,7 @@ pub struct ToolContext {
     pub db: Database,
     pub broadcaster: SseBroadcaster,
     pub repo_path: Option<String>,
+    pub base_branch: String,
 }
 
 pub async fn handle_tool_call(
@@ -134,7 +135,7 @@ async fn update_task_status(args: Value, ctx: &ToolContext) -> Result<Value, Str
     // Auto-merge when task is marked done and server has a repo configured
     if status == "done" {
         if let (Some(ref repo_path), Some(ref branch)) = (&ctx.repo_path, &task.branch_name) {
-            let base = if task.base_branch.is_empty() { "main".to_string() } else { task.base_branch.clone() };
+            let base = if task.base_branch.is_empty() { ctx.base_branch.clone() } else { task.base_branch.clone() };
             let merge_msg = format!("Merge branch '{}' — task {} done", branch, task_id);
             match crate::git::merge_branch(repo_path, branch, &base, &merge_msg).await {
                 Ok(hash) => {
@@ -238,7 +239,7 @@ async fn create_branch(args: Value, ctx: &ToolContext) -> Result<Value, String> 
     let agent_id = args["agent_id"].as_str().ok_or("Missing agent_id")?;
     let task_id = args["task_id"].as_str().ok_or("Missing task_id")?;
     let branch_name = args["branch_name"].as_str().ok_or("Missing branch_name")?;
-    let base_branch = args["base_branch"].as_str().unwrap_or("main");
+    let base_branch = args["base_branch"].as_str().unwrap_or(&ctx.base_branch);
 
     let task = ctx.db.update_task(
         task_id, None, None, None, None, None, None, None, None,
@@ -407,7 +408,7 @@ async fn setup_worktree(args: Value, ctx: &ToolContext) -> Result<Value, String>
     let task_id = args["task_id"].as_str().ok_or("Missing task_id")?;
     let branch_name = args["branch_name"].as_str().ok_or("Missing branch_name")?;
     let worktree_path = args["worktree_path"].as_str().ok_or("Missing worktree_path")?;
-    let base_branch = args["base_branch"].as_str().unwrap_or("main");
+    let base_branch = args["base_branch"].as_str().unwrap_or(&ctx.base_branch);
 
     let task = ctx.db.update_task(
         task_id, None, None, None, None, None, None, None, None,
