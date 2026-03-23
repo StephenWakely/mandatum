@@ -135,7 +135,7 @@ async fn update_task_status(args: Value, ctx: &ToolContext) -> Result<Value, Str
     // Auto-merge when task is marked done and server has a repo configured
     if status == "done" {
         if let (Some(ref repo_path), Some(ref branch)) = (&ctx.repo_path, &task.branch_name) {
-            let base = if task.base_branch.is_empty() { ctx.base_branch.clone() } else { task.base_branch.clone() };
+            let base = ctx.base_branch.clone();
             let merge_msg = format!("Merge branch '{}' — task {} done", branch, task_id);
             match crate::git::merge_branch(repo_path, branch, &base, &merge_msg).await {
                 Ok(hash) => {

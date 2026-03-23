@@ -301,7 +301,7 @@ async fn update_task_handler(
             // Auto-merge when task is marked done via REST
             if body.status.as_deref() == Some("done") {
                 if let (Some(ref repo_path), Some(ref branch)) = (&s.repo_path, &task.branch_name) {
-                    let base = if task.base_branch.is_empty() { s.base_branch.clone() } else { task.base_branch.clone() };
+                    let base = s.base_branch.clone();
                     let merge_msg = format!("Merge branch '{}' — task {} done", branch, id);
                     match git::merge_branch(repo_path, branch, &base, &merge_msg).await {
                         Ok(hash) => {
