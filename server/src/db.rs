@@ -425,6 +425,7 @@ impl Database {
             // next agent of the right type can pick it up freely.
             let status_changed = new_status != existing.status;
             let derived_role: Option<String> = assigned_role.or_else(|| match new_status.as_str() {
+                "in_progress" => Some("coder".to_string()),
                 "in_review"   => Some("reviewer".to_string()),
                 "testing"     => Some("tester".to_string()),
                 "docs_needed" => Some("docs_writer".to_string()),
