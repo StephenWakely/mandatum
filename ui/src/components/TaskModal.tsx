@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import ReactMarkdown from 'react-markdown'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { fetchTask, fetchCommits, fetchAgents, updateTask, deleteTask, resetTask } from '../api'
 import { Task, TaskStatus, TaskPriority, AgentRole, Agent, GIT_ACTIONS } from '../types'
@@ -418,7 +419,16 @@ export default function TaskModal({ task: initialTask, onClose }: TaskModalProps
                           <span className={`font-medium ${isGit ? 'text-emerald-400' : 'text-slate-300'}`}>
                             {entry.action.replace(/_/g, ' ')}
                           </span>
-                          {entry.detail && <p className="text-slate-500 mt-0.5 break-all">{entry.detail}</p>}
+                          {entry.detail && (
+                            <div className="text-slate-500 mt-0.5 prose prose-invert prose-xs max-w-none
+                              prose-p:my-0.5 prose-p:leading-snug
+                              prose-code:text-slate-400 prose-code:bg-slate-800 prose-code:px-1 prose-code:rounded prose-code:text-[0.7rem]
+                              prose-pre:bg-slate-800 prose-pre:text-xs prose-pre:my-1 prose-pre:p-2 prose-pre:rounded
+                              prose-ul:my-0.5 prose-ul:pl-4 prose-ol:my-0.5 prose-ol:pl-4
+                              prose-li:my-0 prose-strong:text-slate-300 prose-a:text-indigo-400">
+                              <ReactMarkdown>{entry.detail}</ReactMarkdown>
+                            </div>
+                          )}
                         </div>
                       </div>
                     )
