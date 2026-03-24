@@ -34,6 +34,7 @@ export default function TaskModal({ task: initialTask, onClose }: TaskModalProps
   const queryClient = useQueryClient()
   const [editing, setEditing] = useState(false)
   const [showStatusMenu, setShowStatusMenu] = useState(false)
+  const [showRoleMenu, setShowRoleMenu] = useState(false)
   const [editForm, setEditForm] = useState({
     title: initialTask.title,
     description: initialTask.description ?? '',
@@ -108,6 +109,11 @@ export default function TaskModal({ task: initialTask, onClose }: TaskModalProps
     setShowStatusMenu(false)
   }
 
+  const handleRoleChange = (role: AgentRole | '') => {
+    updateMutation.mutate({ assigned_role: role || undefined })
+    setShowRoleMenu(false)
+  }
+
   const p = PRIORITY_CONFIG[task.priority]
 
   return (
@@ -161,7 +167,29 @@ export default function TaskModal({ task: initialTask, onClose }: TaskModalProps
                   <span className={`inline-flex items-center gap-1 text-xs rounded px-2 py-0.5 font-medium ${p.bg} ${p.text}`}>
                     <span className={`w-1.5 h-1.5 rounded-full ${p.dot}`} />{p.label}
                   </span>
-                  {task.assigned_role && <AgentBadge role={task.assigned_role as AgentRole} size="md" />}
+                  <div className="relative">
+                    <button onClick={() => setShowRoleMenu(!showRoleMenu)}
+                      className="flex items-center gap-1 hover:opacity-80 transition-opacity">
+                      {task.assigned_role
+                        ? <AgentBadge role={task.assigned_role as AgentRole} size="md" />
+                        : <span className="text-xs text-slate-500 bg-slate-800 rounded px-2 py-0.5">No role</span>
+                      }
+                    </button>
+                    {showRoleMenu && (
+                      <div className="absolute left-0 top-full mt-1 bg-slate-800 border border-slate-700 rounded-lg shadow-xl z-10 py-1 min-w-[8rem]">
+                        <button onClick={() => handleRoleChange('')}
+                          className="block w-full text-left px-3 py-1.5 text-sm text-slate-400 hover:text-white hover:bg-slate-700">
+                          No role
+                        </button>
+                        {ROLES.map(r => (
+                          <button key={r} onClick={() => handleRoleChange(r)}
+                            className="block w-full text-left px-3 py-1.5 text-sm text-slate-300 hover:text-white hover:bg-slate-700 capitalize">
+                            {r.replace(/_/g, ' ')}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                   <span className="text-xs text-slate-500 bg-slate-800 rounded px-2 py-0.5 uppercase font-medium">
                     {task.status.replace(/_/g, ' ')}
                   </span>
