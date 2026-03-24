@@ -41,6 +41,11 @@ Always call heartbeat every 2 minutes while working."
 cd "$PROJECT_DIR"
 
 while true; do
+  if curl -sf "http://localhost:3001/api/agents" 2>/dev/null | \
+      jq -e --arg id "$AGENT_ID" '.[] | select(.agent_id == $id) | .stop_requested == true' > /dev/null 2>&1; then
+    echo "[tester/$AGENT_ID] Stop requested. Exiting."
+    exit 0
+  fi
   echo "[tester/$AGENT_ID] Starting test cycle at $(date '+%H:%M:%S')"
   claude --dangerously-skip-permissions \
     --mcp-config "$MCP_CONFIG" \

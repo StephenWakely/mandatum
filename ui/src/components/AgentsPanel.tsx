@@ -1,9 +1,9 @@
-import { useQuery } from '@tanstack/react-query'
-import { fetchAgents, fetchTasks } from '../api'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { fetchAgents, fetchTasks, stopAgent, unstopAgent } from '../api'
 import { Agent, Task, AgentRole } from '../types'
 import AgentBadge from './AgentBadge'
 import { formatDistanceToNow } from 'date-fns'
-import { Users } from 'lucide-react'
+import { Users, StopCircle, PlayCircle } from 'lucide-react'
 
 interface AgentsPanelProps {
   onTaskSelect: (task: Task) => void
@@ -15,6 +15,8 @@ function isActive(agent: Agent): boolean {
 }
 
 export default function AgentsPanel({ onTaskSelect }: AgentsPanelProps) {
+  const queryClient = useQueryClient()
+
   const { data: agents = [] } = useQuery({
     queryKey: ['agents'],
     queryFn: fetchAgents,
@@ -24,6 +26,16 @@ export default function AgentsPanel({ onTaskSelect }: AgentsPanelProps) {
   const { data: tasks = [] } = useQuery({
     queryKey: ['tasks'],
     queryFn: () => fetchTasks(),
+  })
+
+  const stopMutation = useMutation({
+    mutationFn: (id: string) => stopAgent(id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['agents'] }),
+  })
+
+  const unstopMutation = useMutation({
+    mutationFn: (id: string) => unstopAgent(id),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['agents'] }),
   })
 
   const taskMap = Object.fromEntries(tasks.map(t => [t.id, t]))
@@ -49,10 +61,34 @@ export default function AgentsPanel({ onTaskSelect }: AgentsPanelProps) {
             >
               <div className="flex items-center justify-between mb-1.5">
                 <AgentBadge role={agent.role as AgentRole} size="md" />
-                <span className={`text-xs font-medium ${active ? 'text-emerald-400' : 'text-slate-600'}`}>
-                  {active ? '● active' : '○ inactive'}
-                </span>
+                <div className="flex items-center gap-1.5">
+                  <span className={`text-xs font-medium ${active ? 'text-emerald-400' : 'text-slate-600'}`}>
+                    {active ? '● active' : '○ inactive'}
+                  </span>
+                  {agent.stop_requested ? (
+                    <button
+                      onClick={() => unstopMutation.mutate(agent.agent_id)}
+                      disabled={unstopMutation.isPending}
+                      title="Resume agent"
+                      className="p-0.5 rounded text-amber-400 hover:text-emerald-400 hover:bg-slate-700 transition-colors disabled:opacity-50"
+                    >
+                      <PlayCircle className="w-3.5 h-3.5" />
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => stopMutation.mutate(agent.agent_id)}
+                      disabled={stopMutation.isPending}
+                      title="Stop after current task"
+                      className="p-0.5 rounded text-slate-600 hover:text-red-400 hover:bg-slate-700 transition-colors disabled:opacity-50"
+                    >
+                      <StopCircle className="w-3.5 h-3.5" />
+                    </button>
+                  )}
+                </div>
               </div>
+              {agent.stop_requested && (
+                <p className="text-xs text-amber-400 mb-1">⏹ stopping after current task…</p>
+              )}
               <p className="text-xs font-mono text-slate-300 mb-1">{agent.agent_id}</p>
               {agent.last_seen && (
                 <p className="text-xs text-slate-600">

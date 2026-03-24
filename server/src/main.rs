@@ -144,6 +144,7 @@ async fn main() {
         .route("/api/tasks/:id/reset", axum::routing::post(reset_task_handler))
         .route("/api/activity", get(list_activity_handler))
         .route("/api/agents", get(list_agents_handler))
+        .route("/api/agents/:id/stop", axum::routing::post(stop_agent_handler).delete(unstop_agent_handler))
         .route("/api/stats", get(stats_handler))
         .route("/events", get(sse::sse_handler));
 
@@ -385,6 +386,38 @@ async fn reap_tasks_handler(State(s): State<Arc<AppState>>) -> impl IntoResponse
             }
             Json(serde_json::json!({"reaped": ids})).into_response()
         }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn stop_agent_handler(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match s.db.set_agent_stop(&id, true).await {
+        Ok(Some(agent)) => {
+            s.broadcaster.broadcast(
+                serde_json::json!({"event":"agent_updated","data":agent}).to_string()
+            );
+            Json(agent).into_response()
+        }
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn unstop_agent_handler(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    match s.db.set_agent_stop(&id, false).await {
+        Ok(Some(agent)) => {
+            s.broadcaster.broadcast(
+                serde_json::json!({"event":"agent_updated","data":agent}).to_string()
+            );
+            Json(agent).into_response()
+        }
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }

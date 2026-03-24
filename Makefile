@@ -1,12 +1,4 @@
-.PHONY: dev build serve seed clean agents
-
-# Start both server and UI concurrently
-dev:
-	@echo "Starting Mandatum dev servers..."
-	@trap 'kill %1 %2 2>/dev/null; exit' INT; \
-	(cd server && cargo run 2>&1 | sed 's/^/[server] /') & \
-	(cd ui && npm run dev 2>&1 | sed 's/^/[ui] /') & \
-	wait
+.PHONY: build serve seed clean agents
 
 # Build Rust server (release) and React UI
 build:

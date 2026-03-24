@@ -62,6 +62,7 @@ pub struct Agent {
     pub role: String,
     pub last_seen: Option<String>,
     pub current_task_id: Option<String>,
+    pub stop_requested: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -161,7 +162,8 @@ impl Database {
                     agent_id TEXT PRIMARY KEY,
                     role TEXT NOT NULL,
                     last_seen TEXT,
-                    current_task_id TEXT
+                    current_task_id TEXT,
+                    stop_requested INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS commits (
                     id TEXT PRIMARY KEY,
@@ -180,6 +182,7 @@ impl Database {
             let _ = conn.execute("ALTER TABLE tasks ADD COLUMN commit_count INTEGER DEFAULT 0", []);
             let _ = conn.execute("ALTER TABLE tasks ADD COLUMN pr_url TEXT", []);
             let _ = conn.execute("ALTER TABLE tasks ADD COLUMN worktree_path TEXT", []);
+            let _ = conn.execute("ALTER TABLE agents ADD COLUMN stop_requested INTEGER NOT NULL DEFAULT 0", []);
             Ok(())
         }).await
     }
@@ -544,11 +547,13 @@ impl Database {
             role: role.to_string(),
             last_seen: Some(Utc::now().to_rfc3339()),
             current_task_id: None,
+            stop_requested: false,
         };
         let a = agent.clone();
         self.conn.call(move |conn| {
             conn.execute(
-                "INSERT OR REPLACE INTO agents (agent_id, role, last_seen, current_task_id) VALUES (?1,?2,?3,?4)",
+                "INSERT INTO agents (agent_id, role, last_seen, current_task_id, stop_requested) VALUES (?1,?2,?3,?4,0) \
+                 ON CONFLICT(agent_id) DO UPDATE SET role=?2, last_seen=?3, current_task_id=?4, stop_requested=0",
                 params![a.agent_id, a.role, a.last_seen, a.current_task_id],
             )?;
             Ok(())
@@ -559,15 +564,40 @@ impl Database {
     pub async fn list_agents(&self) -> Result<Vec<Agent>, tokio_rusqlite::Error> {
         self.conn.call(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT agent_id, role, last_seen, current_task_id FROM agents ORDER BY last_seen DESC"
+                "SELECT agent_id, role, last_seen, current_task_id, stop_requested FROM agents ORDER BY last_seen DESC"
             )?;
             let agents = stmt.query_map([], |row| Ok(Agent {
                 agent_id: row.get(0)?,
                 role: row.get(1)?,
                 last_seen: row.get(2)?,
                 current_task_id: row.get(3)?,
+                stop_requested: row.get::<_, i64>(4)? != 0,
             }))?.collect::<Result<Vec<_>, _>>()?;
             Ok(agents)
+        }).await
+    }
+
+    pub async fn set_agent_stop(&self, agent_id: &str, stop: bool) -> Result<Option<Agent>, tokio_rusqlite::Error> {
+        let agent_id = agent_id.to_string();
+        let val = if stop { 1i64 } else { 0i64 };
+        self.conn.call(move |conn| {
+            let rows = conn.execute(
+                "UPDATE agents SET stop_requested = ?1 WHERE agent_id = ?2",
+                params![val, agent_id],
+            )?;
+            if rows == 0 { return Ok(None); }
+            let agent = conn.query_row(
+                "SELECT agent_id, role, last_seen, current_task_id, stop_requested FROM agents WHERE agent_id = ?1",
+                params![agent_id],
+                |row| Ok(Agent {
+                    agent_id: row.get(0)?,
+                    role: row.get(1)?,
+                    last_seen: row.get(2)?,
+                    current_task_id: row.get(3)?,
+                    stop_requested: row.get::<_, i64>(4)? != 0,
+                }),
+            )?;
+            Ok(Some(agent))
         }).await
     }
 

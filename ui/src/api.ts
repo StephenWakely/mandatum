@@ -92,3 +92,15 @@ export async function reapTasks(): Promise<{ reaped: string[] }> {
   if (!res.ok) throw new Error('Failed to reap tasks')
   return res.json()
 }
+
+export async function stopAgent(id: string): Promise<Agent> {
+  const res = await fetch(`${BASE}/agents/${id}/stop`, { method: 'POST' })
+  if (!res.ok) throw new Error('Failed to stop agent')
+  return res.json()
+}
+
+export async function unstopAgent(id: string): Promise<Agent> {
+  const res = await fetch(`${BASE}/agents/${id}/stop`, { method: 'DELETE' })
+  if (!res.ok) throw new Error('Failed to resume agent')
+  return res.json()
+}

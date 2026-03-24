@@ -48,6 +48,7 @@ export interface Agent {
   role: AgentRole
   last_seen?: string
   current_task_id?: string
+  stop_requested: boolean
 }
 
 export interface Stats {

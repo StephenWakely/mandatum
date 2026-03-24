@@ -44,6 +44,12 @@ If a task has no branch yet and no worktree is appropriate, use create_branch in
 cd "$PROJECT_DIR"
 
 while true; do
+  # Check if stop has been requested for this agent
+  if curl -sf "http://localhost:3001/api/agents" 2>/dev/null | \
+      jq -e --arg id "$AGENT_ID" '.[] | select(.agent_id == $id) | .stop_requested == true' > /dev/null 2>&1; then
+    echo "[coder/$AGENT_ID] Stop requested. Exiting."
+    exit 0
+  fi
   echo "[coder/$AGENT_ID] Starting task cycle at $(date '+%H:%M:%S')"
   claude --dangerously-skip-permissions \
     --mcp-config "$MCP_CONFIG" \
