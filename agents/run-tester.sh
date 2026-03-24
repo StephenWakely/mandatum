@@ -10,10 +10,14 @@ PROJECT_DIR="${2:-${PROJECT_DIR:-$(pwd)}}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MCP_CONFIG="$SCRIPT_DIR/mcp-config.json"
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
+LOG_DIR="${LOG_DIR:-$SCRIPT_DIR/logs}"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/tester-$AGENT_ID.log"
 
 echo "[tester] Starting agent : $AGENT_ID"
 echo "[tester] Project dir    : $PROJECT_DIR"
 echo "[tester] MCP config     : $MCP_CONFIG"
+echo "[tester] Log file       : $LOG_FILE"
 echo "[tester] Press Ctrl-C to stop."
 echo ""
 
@@ -40,7 +44,7 @@ while true; do
   echo "[tester/$AGENT_ID] Starting test cycle at $(date '+%H:%M:%S')"
   claude --dangerously-skip-permissions \
     --mcp-config "$MCP_CONFIG" \
-    --print "$PROMPT" || true
+    --print "$PROMPT" 2>&1 | tee -a "$LOG_FILE" || true
   echo ""
   echo "[tester/$AGENT_ID] Cycle complete. Restarting in 10s..."
   sleep 10

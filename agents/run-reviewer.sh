@@ -10,10 +10,14 @@ PROJECT_DIR="${2:-${PROJECT_DIR:-$(pwd)}}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MCP_CONFIG="$SCRIPT_DIR/mcp-config.json"
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
+LOG_DIR="${LOG_DIR:-$SCRIPT_DIR/logs}"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/reviewer-$AGENT_ID.log"
 
 echo "[reviewer] Starting agent : $AGENT_ID"
 echo "[reviewer] Project dir    : $PROJECT_DIR"
 echo "[reviewer] MCP config     : $MCP_CONFIG"
+echo "[reviewer] Log file       : $LOG_FILE"
 echo "[reviewer] Press Ctrl-C to stop."
 echo ""
 
@@ -41,7 +45,7 @@ while true; do
   echo "[reviewer/$AGENT_ID] Starting review cycle at $(date '+%H:%M:%S')"
   claude --dangerously-skip-permissions \
     --mcp-config "$MCP_CONFIG" \
-    --print "$PROMPT" || true
+    --print "$PROMPT" 2>&1 | tee -a "$LOG_FILE" || true
   echo ""
   echo "[reviewer/$AGENT_ID] Cycle complete. Restarting in 10s..."
   sleep 10

@@ -13,10 +13,14 @@ PROJECT_DIR="${2:-${PROJECT_DIR:-$(pwd)}}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MCP_CONFIG="$SCRIPT_DIR/mcp-config.json"
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"   # resolve to absolute path
+LOG_DIR="${LOG_DIR:-$SCRIPT_DIR/logs}"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/coder-$AGENT_ID.log"
 
 echo "[coder] Starting agent : $AGENT_ID"
 echo "[coder] Project dir    : $PROJECT_DIR"
 echo "[coder] MCP config     : $MCP_CONFIG"
+echo "[coder] Log file       : $LOG_FILE"
 echo "[coder] Press Ctrl-C to stop."
 echo ""
 
@@ -43,7 +47,7 @@ while true; do
   echo "[coder/$AGENT_ID] Starting task cycle at $(date '+%H:%M:%S')"
   claude --dangerously-skip-permissions \
     --mcp-config "$MCP_CONFIG" \
-    --print "$PROMPT" || true
+    --print "$PROMPT" 2>&1 | tee -a "$LOG_FILE" || true
   echo ""
   echo "[coder/$AGENT_ID] Cycle complete. Restarting in 10s..."
   sleep 10
