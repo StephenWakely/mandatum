@@ -232,7 +232,7 @@ export default function TaskModal({ task: initialTask, onClose }: TaskModalProps
                 </div>
                 {(agentIsStale || task.status === 'in_progress') && (
                   <button
-                    onClick={() => { if (confirm('Reset task to backlog and unassign agent?')) resetMutation.mutate() }}
+                    onClick={() => { if (confirm('Reset task to its role queue and unassign agent?')) resetMutation.mutate() }}
                     disabled={resetMutation.isPending}
                     className="flex items-center gap-1 text-xs text-slate-400 hover:text-amber-300 hover:bg-amber-900/30 rounded px-2 py-1 transition-colors disabled:opacity-50"
                   >

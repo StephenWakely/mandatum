@@ -90,6 +90,16 @@ pub fn suggest_branch(task_id: &str, title: &str) -> String {
     format!("feature/{}-{}", short_id, branch_slug(title))
 }
 
+fn queue_status_for_role(role: Option<&str>) -> &'static str {
+    match role {
+        Some("coder") => "backlog",
+        Some("reviewer") => "in_review",
+        Some("tester") => "testing",
+        Some("docs_writer") => "docs_needed",
+        _ => "backlog",
+    }
+}
+
 fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
     let tags_str: String = row.get::<_, String>(10).unwrap_or_else(|_| "[]".to_string());
     let tags: Vec<String> = serde_json::from_str(&tags_str).unwrap_or_default();
@@ -427,13 +437,7 @@ impl Database {
             // When status changes, derive the role and clear the agent so the
             // next agent of the right type can pick it up freely.
             let status_changed = new_status != existing.status;
-            let derived_role: Option<String> = assigned_role.or_else(|| match new_status.as_str() {
-                "in_progress" => Some("coder".to_string()),
-                "in_review"   => Some("reviewer".to_string()),
-                "testing"     => Some("tester".to_string()),
-                "docs_needed" => Some("docs_writer".to_string()),
-                _             => existing.assigned_role,
-            });
+            let derived_role: Option<String> = assigned_role.or(existing.assigned_role);
             let new_assigned_role     = derived_role;
             let new_assigned_agent_id = if status_changed || clear_agent {
                 assigned_agent_id  // None when clearing or status changed
@@ -615,6 +619,50 @@ impl Database {
         Ok(now)
     }
 
+    pub async fn clear_agent_current_task(&self, agent_id: &str) -> Result<(), tokio_rusqlite::Error> {
+        let agent_id = agent_id.to_string();
+        let now = Utc::now().to_rfc3339();
+        self.conn.call(move |conn| {
+            conn.execute(
+                "UPDATE agents SET current_task_id = NULL, last_seen = ?1 WHERE agent_id = ?2",
+                params![now, agent_id],
+            )?;
+            Ok(())
+        }).await
+    }
+
+    pub async fn clear_agent_current_task_if_matches(
+        &self,
+        agent_id: &str,
+        task_id: &str,
+    ) -> Result<(), tokio_rusqlite::Error> {
+        let agent_id = agent_id.to_string();
+        let task_id = task_id.to_string();
+        let now = Utc::now().to_rfc3339();
+        self.conn.call(move |conn| {
+            conn.execute(
+                "UPDATE agents SET current_task_id = NULL, last_seen = ?1 \
+                 WHERE agent_id = ?2 AND current_task_id = ?3",
+                params![now, agent_id, task_id],
+            )?;
+            Ok(())
+        }).await
+    }
+
+    pub async fn get_active_task_for_agent(
+        &self,
+        agent_id: &str,
+    ) -> Result<Option<Task>, tokio_rusqlite::Error> {
+        let agent_id = agent_id.to_string();
+        self.conn.call(move |conn| {
+            Ok(conn.query_row(
+                &format!("{} WHERE assigned_agent_id = ?1 AND status = 'in_progress' ORDER BY updated_at DESC LIMIT 1", TASK_SELECT),
+                params![agent_id],
+                row_to_task,
+            ).optional()?)
+        }).await
+    }
+
     pub async fn get_next_task_for_role(
         &self,
         agent_id: &str,
@@ -636,10 +684,9 @@ impl Database {
                 "SELECT id FROM tasks \
                  WHERE status = ?1 \
                  AND (assigned_agent_id IS NULL OR assigned_agent_id = '') \
-                 AND (assigned_role IS NULL OR assigned_role = '' OR assigned_role = ?2) \
                  ORDER BY CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END, \
                  created_at ASC LIMIT 1",
-                params![target_status, role],
+                params![target_status],
                 |row| row.get(0),
             ).optional()?;
 
@@ -648,8 +695,8 @@ impl Database {
                 Some(tid) => {
                     let now = Utc::now().to_rfc3339();
                     conn.execute(
-                        "UPDATE tasks SET assigned_agent_id = ?1, status = 'in_progress', updated_at = ?2 WHERE id = ?3",
-                        params![agent_id, now, tid],
+                        "UPDATE tasks SET assigned_agent_id = ?1, assigned_role = ?2, status = 'in_progress', updated_at = ?3 WHERE id = ?4",
+                        params![agent_id, role, now, tid],
                     )?;
                     conn.execute(
                         "UPDATE agents SET current_task_id = ?1, last_seen = ?2 WHERE agent_id = ?3",
@@ -678,25 +725,22 @@ impl Database {
             let now = Utc::now().to_rfc3339();
 
             let mut stmt = conn.prepare(
-                "SELECT id FROM tasks WHERE status = 'in_progress' \
+                "SELECT id, assigned_role FROM tasks WHERE status = 'in_progress' \
                  AND assigned_agent_id IS NOT NULL AND assigned_agent_id != '' \
                  AND assigned_agent_id IN \
                  (SELECT agent_id FROM agents WHERE last_seen < datetime('now', ?1))"
             )?;
-            let ids: Vec<String> = stmt.query_map(params![cutoff], |row| row.get(0))?
-                .collect::<Result<Vec<_>, _>>()?;
+            let stale: Vec<(String, Option<String>)> = stmt.query_map(params![cutoff], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?.collect::<Result<Vec<_>, _>>()?;
 
-            if !ids.is_empty() {
+            for (id, assigned_role) in &stale {
                 conn.execute(
-                    "UPDATE tasks SET status = 'backlog', assigned_agent_id = NULL, updated_at = ?1 \
-                     WHERE status = 'in_progress' \
-                     AND assigned_agent_id IS NOT NULL AND assigned_agent_id != '' \
-                     AND assigned_agent_id IN \
-                     (SELECT agent_id FROM agents WHERE last_seen < datetime('now', ?2))",
-                    params![now, cutoff],
+                    "UPDATE tasks SET status = ?1, assigned_agent_id = NULL, updated_at = ?2 WHERE id = ?3",
+                    params![queue_status_for_role(assigned_role.as_deref()), now, id],
                 )?;
             }
-            Ok(ids)
+            Ok(stale.into_iter().map(|(id, _)| id).collect())
         }).await
     }
 
@@ -704,9 +748,14 @@ impl Database {
         let id = id.to_string();
         let now = Utc::now().to_rfc3339();
         self.conn.call(move |conn| {
+            let assigned_role: Option<String> = conn.query_row(
+                "SELECT assigned_role FROM tasks WHERE id = ?1",
+                params![id.clone()],
+                |row| row.get(0),
+            ).optional()?.flatten();
             conn.execute(
-                "UPDATE tasks SET status = 'backlog', assigned_agent_id = NULL, updated_at = ?1 WHERE id = ?2",
-                params![now, id],
+                "UPDATE tasks SET status = ?1, assigned_agent_id = NULL, updated_at = ?2 WHERE id = ?3",
+                params![queue_status_for_role(assigned_role.as_deref()), now, id],
             )?;
             Ok(conn.query_row(
                 &format!("{} WHERE id = ?1", TASK_SELECT),

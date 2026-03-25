@@ -72,25 +72,36 @@ Once running, open **http://localhost:5173** in your browser.
 
 ## Running Autonomous Agents
 
-Agents are Claude Code instances running in non-interactive (`--print`) mode, looped by shell scripts. After completing a task they restart automatically rather than waiting for user input.
+Mandatum supports both Claude and Codex runner scripts. In both cases, agents run non-interactively in a shell loop, complete a task cycle, exit, then restart automatically instead of waiting for user input.
+The runner shell now claims the task and prepares the worktree before launching the model so agents do not edit the target repo's main checkout by accident.
 
 ### Prerequisites
 
-- `claude` CLI on your `PATH` — install via [Claude Code](https://claude.ai/claude-code)
+- Either:
+  - `claude` CLI on your `PATH` — install via [Claude Code](https://claude.ai/claude-code)
+  - `codex` CLI on your `PATH`
 - The Mandatum server must be running (`make dev` or `cargo run`)
 - The project the agents will work on must be a git repository
 
 ### Quickstart
 
 ```bash
-# From inside your project repo — launch one of each agent type
-make -C /path/to/mandatum agents PROJECT_DIR=$(pwd)
+# Claude runners
+/path/to/mandatum/agents/claude/run-all.sh /path/to/your/project
 
-# Or use the script directly
-/path/to/mandatum/agents/run-all.sh /path/to/your/project
+# Codex runners
+/path/to/mandatum/agents/codex/run-all.sh /path/to/your/project
 ```
 
 Press **Ctrl-C** to stop all agents cleanly.
+
+### Runner layout
+
+```text
+agents/
+├── claude/   # Claude Code runner scripts
+└── codex/    # Codex runner scripts
+```
 
 ### Running individual agents
 
@@ -100,20 +111,27 @@ Each role has its own script. All accept an optional agent ID and project direct
 # Usage: run-<role>.sh [agent-id] [project-dir]
 # PROJECT_DIR env var is also accepted.
 
-/path/to/mandatum/agents/run-coder.sh    coder-alpha   /path/to/project
-/path/to/mandatum/agents/run-reviewer.sh reviewer-1    /path/to/project
-/path/to/mandatum/agents/run-tester.sh   tester-1      /path/to/project
-/path/to/mandatum/agents/run-docs.sh     docs-1        /path/to/project
+# Claude
+/path/to/mandatum/agents/claude/run-coder.sh    coder-alpha   /path/to/project
+/path/to/mandatum/agents/claude/run-reviewer.sh reviewer-1    /path/to/project
+/path/to/mandatum/agents/claude/run-tester.sh   tester-1      /path/to/project
+/path/to/mandatum/agents/claude/run-docs.sh     docs-1        /path/to/project
+
+# Codex
+/path/to/mandatum/agents/codex/run-coder.sh    coder-alpha   /path/to/project
+/path/to/mandatum/agents/codex/run-reviewer.sh reviewer-1    /path/to/project
+/path/to/mandatum/agents/codex/run-tester.sh   tester-1      /path/to/project
+/path/to/mandatum/agents/codex/run-docs.sh     docs-1        /path/to/project
 ```
 
 Run multiple coders in parallel by opening separate terminals with different agent IDs:
 
 ```bash
 # Terminal 1
-run-coder.sh coder-alpha /path/to/project
+agents/codex/run-coder.sh coder-alpha /path/to/project
 
 # Terminal 2
-run-coder.sh coder-beta /path/to/project
+agents/codex/run-coder.sh coder-beta /path/to/project
 ```
 
 ### Project directory vs Mandatum directory
@@ -122,24 +140,24 @@ The scripts separate two concerns:
 
 | Path | Purpose |
 |------|---------|
-| Mandatum directory | Where the tracker server lives (`make dev`, `tasks.db`) |
+| Mandatum directory | Where the tracker server and agent runner scripts live (`make dev`, `tasks.db`) |
 | Project directory | The git repo agents check out branches and commit code into |
 
-The MCP config path is always resolved relative to the `agents/` folder regardless of where you invoke the script from. The `claude` process runs with its cwd set to your project directory so all git operations land in the right repo.
+Claude runner config is resolved relative to `agents/claude/`. Codex runners use your normal `HOME` by default and register the `task-tracker` MCP server there automatically. Set `CODEX_RUN_HOME=/some/path` if you want an isolated Codex home for Mandatum-only runs. In both cases, the agent process runs with its cwd set to your project directory so all git operations land in the right repo.
 
 ### How the loop works
 
-Each script runs `claude --print "<system-prompt>"` in a shell loop:
+Claude scripts run `claude --print "<system-prompt>"` in a shell loop. Codex scripts run `codex exec "<system-prompt>"` in the same pattern. Before each model invocation, the wrapper claims the next task over MCP and creates or reuses the correct worktree in bash.
 
 ```
-claude --print "..." → agent runs, completes task, exits
+<agent command> "..." → agent runs, completes task, exits
         ↓ (10s pause)
-claude --print "..." → agent picks up next task
+<agent command> "..." → agent picks up next task
         ↓
         ...
 ```
 
-If an agent's tokens are exhausted mid-task, the process exits and the loop restarts after 10 seconds. The server's watchdog will reap the stuck task back to `backlog` within 10 minutes so another agent (or the restarted one) can claim it.
+If an agent's tokens are exhausted mid-task, the process exits and the loop restarts after 10 seconds. The server's watchdog will reap the stuck task back to the queue implied by its current `assigned_role` within 10 minutes so the right agent type can claim it again.
 
 ### Stale agent detection
 
@@ -246,7 +264,7 @@ backlog → [coder claims] → in_progress → [coder requests review] → in_re
 4. git diff main --stat   → inspect changes
 5. add_task_comment       → log review notes
 6. approve_review         → moves to testing
-   OR request_changes     → moves back to in_progress with feedback
+   OR request_changes     → moves to backlog for coder, clears reviewer assignment, adds feedback
 7. git worktree remove .worktrees/<branch>-review  → clean up when done
 ```
 
@@ -309,26 +327,30 @@ The tracker records each agent's `worktree_path` so the UI shows exactly where e
 
 ### MCP Configuration
 
-Add this to your Claude Desktop or Claude Code MCP config:
+Recommended endpoint for modern MCP clients, including Codex and Claude Code CLI:
+
+```bash
+codex mcp add task-tracker --url http://localhost:3002
+claude mcp add --transport http task-tracker http://localhost:3002
+```
+
+For JSON config-based clients, use:
 
 ```json
 {
   "mcpServers": {
     "task-tracker": {
-      "url": "http://localhost:3002/sse"
+      "url": "http://localhost:3002"
     }
   }
 }
 ```
 
-For Claude Code CLI:
-```bash
-claude mcp add --transport http task-tracker http://localhost:3002
-```
+Legacy SSE-only clients can continue using `http://localhost:3002/sse`.
 
 ### Using the runner scripts (recommended)
 
-The `agents/` directory contains pre-configured runner scripts that handle the MCP connection automatically. See [Running Autonomous Agents](#running-autonomous-agents) above — no manual MCP config needed.
+The [agents/claude/](/run/media/plertrood/sponk/src/rust/Mandatum/agents/claude) and [agents/codex/](/run/media/plertrood/sponk/src/rust/Mandatum/agents/codex) directories contain pre-configured runner scripts that handle the MCP connection automatically. See [Running Autonomous Agents](#running-autonomous-agents) above. No manual MCP config is needed when you use those scripts.
 
 ### Multiple Agents Simultaneously
 
@@ -363,6 +385,10 @@ Role → picks from status:
 - `reviewer` → `in_review`
 - `tester` → `testing`
 - `docs_writer` → `docs_needed`
+
+`assigned_role` is informational only. Claim routing is driven by task status, not by the label.
+When a task is claimed, its informational `assigned_role` label is updated to the claiming agent's role.
+An agent can only have one active `in_progress` task at a time. If it already has one, `get_next_task` returns that task instead of claiming another.
 
 ### `update_task_status`
 Move a task to a new status and log the transition.
@@ -402,6 +428,8 @@ Create a new task. Agents can spawn subtasks.
   "tags": ["backend", "security"]
 }
 ```
+
+`assigned_role` is stored for UI and reporting purposes. It does not affect which agent can claim the task.
 
 ### `list_tasks`
 Query tasks with optional filters.
@@ -497,7 +525,7 @@ Approve the review — moves task to `testing`.
 ```
 
 ### `request_changes`
-Request changes — moves task back to `in_progress` with feedback for the coder.
+Request changes — relabels the task for `coder`, moves it back to `backlog`, clears the reviewer assignment, and records feedback for the coder.
 
 ```json
 {
@@ -567,7 +595,7 @@ Returns:
 > 5. Inspect changes: `git diff main --stat` then `git diff main`
 > 6. Log findings with `add_task_comment`
 > 7. If approved: call `approve_review` — moves to `testing`
-> 8. If changes needed: call `request_changes` with specific feedback — moves back to `in_progress`
+> 8. If changes needed: call `request_changes` with specific feedback — moves to `backlog` for coder and clears the reviewer assignment
 > 9. Run `git worktree remove .worktrees/<branch>-review` to clean up. Repeat. Send a `heartbeat` every few minutes.
 
 ### Tester Agent

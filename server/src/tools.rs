@@ -67,6 +67,15 @@ async fn register_agent(args: Value, ctx: &ToolContext) -> Result<Value, String>
 async fn get_next_task(args: Value, ctx: &ToolContext) -> Result<Value, String> {
     let agent_id = args["agent_id"].as_str().ok_or("Missing agent_id")?;
     let role = args["role"].as_str().ok_or("Missing role")?;
+
+    if let Some(task) = ctx.db.get_active_task_for_agent(agent_id).await.map_err(|e| e.to_string())? {
+        info!(agent_id, role, task_id = %task.id, "get_next_task: agent already has active task");
+        return Ok(serde_json::json!({
+            "message": "Agent already has an active task",
+            "task": task
+        }));
+    }
+
     match ctx.db.get_next_task_for_role(agent_id, role).await.map_err(|e| e.to_string())? {
         None => {
             info!(agent_id, role, "get_next_task: no tasks available");
@@ -107,6 +116,11 @@ async fn update_task_status(args: Value, ctx: &ToolContext) -> Result<Value, Str
         None, None, None, None, None,
     ).await.map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Task {} not found", task_id))?;
+
+    if status != "in_progress" {
+        ctx.db.clear_agent_current_task_if_matches(agent_id, task_id)
+            .await.map_err(|e| e.to_string())?;
+    }
 
     info!(agent_id, task_id, status, "task status updated");
     let role = agent_role(&ctx.db, agent_id).await;
@@ -286,6 +300,9 @@ async fn request_review(args: Value, ctx: &ToolContext) -> Result<Value, String>
     ).await.map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Task {} not found", task_id))?;
 
+    ctx.db.clear_agent_current_task_if_matches(agent_id, task_id)
+        .await.map_err(|e| e.to_string())?;
+
     info!(agent_id, task_id, commit = ?commit_hash, "review requested");
     let role = agent_role(&ctx.db, agent_id).await;
     let detail = match commit_hash {
@@ -355,6 +372,9 @@ async fn approve_review(args: Value, ctx: &ToolContext) -> Result<Value, String>
     ).await.map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Task {} not found", task_id))?;
 
+    ctx.db.clear_agent_current_task_if_matches(agent_id, task_id)
+        .await.map_err(|e| e.to_string())?;
+
     let role = agent_role(&ctx.db, agent_id).await;
     let entry = ctx.db.add_activity(task_id, Some(agent_id), role.as_deref(), "approved",
         Some(comment)).await.map_err(|e| e.to_string())?;
@@ -364,17 +384,20 @@ async fn approve_review(args: Value, ctx: &ToolContext) -> Result<Value, String>
     Ok(serde_json::json!({"message": "Review approved, task moved to testing", "task": task}))
 }
 
-/// Reviewer requests changes — moves back to in_progress.
+/// Reviewer requests changes — requeues for coder, clears reviewer assignment.
 async fn request_changes(args: Value, ctx: &ToolContext) -> Result<Value, String> {
     let agent_id = args["agent_id"].as_str().ok_or("Missing agent_id")?;
     let task_id = args["task_id"].as_str().ok_or("Missing task_id")?;
     let feedback = args["feedback"].as_str().ok_or("Missing feedback")?;
 
     let task = ctx.db.update_task(
-        task_id, None, None, Some("in_progress"), None, None, None, None, None,
+        task_id, None, None, Some("backlog"), None, Some("coder"), Some(""), None, None,
         None, None, None, None, None,
     ).await.map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Task {} not found", task_id))?;
+
+    ctx.db.clear_agent_current_task(agent_id)
+        .await.map_err(|e| e.to_string())?;
 
     let role = agent_role(&ctx.db, agent_id).await;
     let entry = ctx.db.add_activity(task_id, Some(agent_id), role.as_deref(), "changes_requested",
@@ -383,7 +406,7 @@ async fn request_changes(args: Value, ctx: &ToolContext) -> Result<Value, String
     broadcast(ctx, "task_updated", &serde_json::json!(task));
     broadcast(ctx, "activity_added", &serde_json::json!(entry));
     Ok(serde_json::json!({
-        "message": "Changes requested, task moved back to in_progress",
+        "message": "Changes requested, task moved to backlog for coder and reviewer unassigned",
         "task": task,
         "feedback": feedback
     }))
@@ -537,7 +560,7 @@ pub fn tool_definitions() -> serde_json::Value {
         },
         {
             "name": "request_changes",
-            "description": "Request changes from the coder — moves task back to in_progress.",
+            "description": "Request changes from the coder — moves task to backlog for coder and clears the reviewer assignment.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
