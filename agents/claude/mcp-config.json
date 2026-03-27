@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "task-tracker": {
+      "type": "http",
+      "url": "http://localhost:3002"
+    }
+  }
+}

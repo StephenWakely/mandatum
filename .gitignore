@@ -1,6 +1,8 @@
 server/target/
 ui/node_modules/
 ui/dist/
+agents/codex/.codex-home
+agents/codex/logs/
 *.db
 *.db-shm
 *.db-wal
