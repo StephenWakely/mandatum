@@ -6,8 +6,7 @@ import TaskCard from './TaskCard'
 import TaskModal from './TaskModal'
 
 const COLUMNS: { status: TaskStatus; label: string }[] = [
-  { status: 'backlog',     label: 'Backlog'     },
-  { status: 'in_progress', label: 'In Progress' },
+  { status: 'backlog',     label: 'Coder'       },
   { status: 'in_review',   label: 'In Review'   },
   { status: 'testing',     label: 'Testing'     },
   { status: 'docs_needed', label: 'Docs Needed' },
@@ -17,7 +16,7 @@ const COLUMNS: { status: TaskStatus; label: string }[] = [
 
 const COLUMN_ACCENT: Record<TaskStatus, string> = {
   backlog:     'border-t-slate-500',
-  in_progress: 'border-t-blue-500',
+  in_progress: 'border-t-slate-500',
   in_review:   'border-t-purple-500',
   testing:     'border-t-amber-500',
   docs_needed: 'border-t-green-500',
@@ -58,7 +57,14 @@ export default function Board({ onTaskSelect, selectedTask }: BoardProps) {
   })
 
   const tasksByStatus = Object.fromEntries(
-    COLUMNS.map(col => [col.status, tasks.filter(t => t.status === col.status)])
+    COLUMNS.map(col => [
+      col.status,
+      tasks.filter(t =>
+        t.status === col.status ||
+        // in_progress tasks live in the Coder column
+        (col.status === 'backlog' && t.status === 'in_progress')
+      ),
+    ])
   ) as Record<TaskStatus, Task[]>
 
   const handleDragStart = (e: React.DragEvent, taskId: string) => {

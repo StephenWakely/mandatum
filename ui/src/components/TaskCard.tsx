@@ -1,7 +1,7 @@
 import { Task, TaskPriority, AgentRole, Agent } from '../types'
 import AgentBadge from './AgentBadge'
 import { formatDistanceToNow } from 'date-fns'
-import { GitBranch, GitCommit, AlertTriangle } from 'lucide-react'
+import { GitBranch, GitCommit, AlertTriangle, Zap } from 'lucide-react'
 
 export const PRIORITY_CONFIG: Record<TaskPriority, { label: string; bg: string; text: string; dot: string }> = {
   critical: { label: 'Critical', bg: 'bg-red-900/60',    text: 'text-red-300',    dot: 'bg-red-400'    },
@@ -24,17 +24,51 @@ interface TaskCardProps {
   onDragStart: (e: React.DragEvent) => void
 }
 
+const ACTIVE_AGENT_MS = 5 * 60 * 1000 // 5 minutes
+
+function agentIsActive(agent: Agent | undefined): boolean {
+  if (!agent?.last_seen) return false
+  return Date.now() - new Date(agent.last_seen).getTime() < ACTIVE_AGENT_MS
+}
+
 export default function TaskCard({ task, agent, onClick, onDragStart }: TaskCardProps) {
   const p = PRIORITY_CONFIG[task.priority]
   const stale = agentIsStale(agent)
+  const claimed = !!task.assigned_agent_id
+  const active = agentIsActive(agent)
 
   return (
     <div
       draggable
       onDragStart={onDragStart}
       onClick={onClick}
-      className="group bg-slate-800 border border-slate-700 rounded-lg p-3 cursor-pointer hover:border-slate-500 transition-all duration-150 select-none"
+      className={`group rounded-lg p-3 cursor-pointer transition-all duration-150 select-none border ${
+        claimed
+          ? 'bg-blue-950/40 border-blue-700/60 hover:border-blue-500 ring-1 ring-blue-800/40'
+          : 'bg-slate-800 border-slate-700 hover:border-slate-500'
+      }`}
     >
+      {/* Agent claim banner */}
+      {claimed && (
+        <div className={`flex items-center gap-1.5 -mx-3 -mt-3 mb-3 px-3 py-1.5 rounded-t-lg border-b ${
+          stale
+            ? 'bg-amber-900/40 border-amber-700/40'
+            : 'bg-blue-900/50 border-blue-700/40'
+        }`}>
+          {stale ? (
+            <AlertTriangle className="w-3 h-3 shrink-0 text-amber-400" />
+          ) : (
+            <Zap className={`w-3 h-3 shrink-0 text-blue-400 ${active ? 'animate-pulse' : ''}`} />
+          )}
+          <span className={`text-xs font-semibold ${stale ? 'text-amber-300' : 'text-blue-300'}`}>
+            {stale ? 'Agent stale' : 'In progress'}
+          </span>
+          <span className="ml-auto text-xs font-mono truncate text-slate-400 max-w-[100px]">
+            {task.assigned_agent_id}
+          </span>
+        </div>
+      )}
+
       <div className="flex items-center justify-between mb-2 gap-1">
         <span className={`inline-flex items-center gap-1 text-xs rounded px-1.5 py-0.5 font-medium ${p.bg} ${p.text}`}>
           <span className={`w-1.5 h-1.5 rounded-full ${p.dot}`} />
@@ -71,15 +105,10 @@ export default function TaskCard({ task, agent, onClick, onDragStart }: TaskCard
         </div>
       )}
 
-      {!task.branch_name && task.assigned_agent_id && (
-        <p className="text-xs text-slate-500 font-mono truncate">{task.assigned_agent_id}</p>
-      )}
-
-      {/* Stale agent warning */}
+      {/* Stale agent last-seen */}
       {stale && agent?.last_seen && (
         <div className="flex items-center gap-1 mt-1.5 text-xs text-amber-500/80">
-          <AlertTriangle className="w-3 h-3 shrink-0" />
-          <span>Agent stale · {formatDistanceToNow(new Date(agent.last_seen), { addSuffix: true })}</span>
+          <span>Last seen {formatDistanceToNow(new Date(agent.last_seen), { addSuffix: true })}</span>
         </div>
       )}
     </div>
