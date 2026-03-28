@@ -1,5 +1,7 @@
 use serde_json::Value;
+use std::sync::Arc;
 use crate::db::{Database, suggest_branch};
+use crate::metrics::Metrics;
 use crate::sse::SseBroadcaster;
 use tracing::{info, warn};
 
@@ -8,6 +10,7 @@ pub struct ToolContext {
     pub broadcaster: SseBroadcaster,
     pub repo_path: Option<String>,
     pub base_branch: String,
+    pub metrics: Arc<Metrics>,
 }
 
 pub async fn handle_tool_call(
@@ -86,6 +89,7 @@ async fn get_next_task(args: Value, ctx: &ToolContext) -> Result<Value, String> 
         }
         Some(task) => {
             info!(agent_id, role, task_id = %task.id, title = %task.title, "task assigned");
+            ctx.metrics.task_claimed(role);
             let suggested_branch = suggest_branch(&task.id, &task.title);
             broadcast(ctx, "task_updated", &serde_json::json!(task));
             Ok(serde_json::json!({
@@ -111,9 +115,11 @@ async fn update_task_status(args: Value, ctx: &ToolContext) -> Result<Value, Str
     let status = args["status"].as_str().ok_or("Missing status")?;
     let note = args["note"].as_str();
 
+    let prev_status = ctx.db.get_task(task_id).await.ok().flatten().map(|t| t.status);
+
     let task = ctx.db.update_task(
         task_id, None, None, Some(status), None, None, None, None, None,
-        None, None, None, None, None,
+        None, None, None, None, None, None,
     ).await.map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Task {} not found", task_id))?;
 
@@ -133,23 +139,33 @@ async fn update_task_status(args: Value, ctx: &ToolContext) -> Result<Value, Str
     broadcast(ctx, "task_updated", &serde_json::json!(task));
     broadcast(ctx, "activity_added", &serde_json::json!(entry));
 
+    if let Some(ref from) = prev_status {
+        if from != status {
+            ctx.metrics.task_status_changed(from, status);
+        }
+    }
+    if status == "done" {
+        ctx.metrics.task_done(&task.title, &task.created_at);
+    }
+
     // Auto-merge when task is marked done and server has a repo configured
     if status == "done" {
         if let (Some(ref repo_path), Some(ref branch)) = (&ctx.repo_path, &task.branch_name) {
             let base = ctx.base_branch.clone();
-            let merge_msg = format!("Merge branch '{}' — task {} done", branch, task_id);
+            let merge_msg = format!("Merge '{}': {}", branch, task.title);
             match crate::git::merge_branch(repo_path, branch, &base, &merge_msg).await {
                 Ok(hash) => {
                     info!(branch, base, commit = &hash[..hash.len().min(8)], "auto-merge succeeded");
                     let _ = ctx.db.add_activity(task_id, Some(agent_id), role.as_deref(), "merged",
                         Some(&format!("Merged '{}' into '{}' ({})", branch, base, &hash[..hash.len().min(8)])))
                         .await;
+                    crate::git::cleanup_task_worktrees(repo_path, branch).await;
                 }
                 Err(e) => {
                     warn!(branch, base, task_id, error = %e, "auto-merge failed, task moved to blocked");
                     let _ = ctx.db.update_task(
                         task_id, None, None, Some("blocked"), None, None, None, None, None,
-                        None, None, None, None, None,
+                        None, None, None, None, None, None,
                     ).await;
                     let _ = ctx.db.add_activity(task_id, Some(agent_id), role.as_deref(), "merge_failed",
                         Some(&format!("Auto-merge failed: {}", e)))
@@ -184,13 +200,19 @@ async fn create_task(args: Value, ctx: &ToolContext) -> Result<Value, String> {
     let description = args["description"].as_str();
     let priority = args["priority"].as_str().unwrap_or("medium");
     let assigned_role = args["assigned_role"].as_str();
+    let branch_name = args["branch_name"].as_str()
+        .filter(|s| !s.is_empty());
     let tags: Vec<String> = args["tags"].as_array()
         .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
         .unwrap_or_default();
+    let dependencies: Vec<String> = args["dependencies"].as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
 
-    let task = ctx.db.create_task(Some(agent_id), title, description, priority, assigned_role, &tags)
+    let task = ctx.db.create_task(Some(agent_id), title, description, priority, assigned_role, branch_name, &tags, &dependencies)
         .await.map_err(|e| e.to_string())?;
     broadcast(ctx, "task_created", &serde_json::json!(task));
+    ctx.metrics.task_created();
     Ok(serde_json::json!({"task": task}))
 }
 
@@ -217,7 +239,7 @@ async fn set_output_path(args: Value, ctx: &ToolContext) -> Result<Value, String
     let output_path = args["output_path"].as_str().ok_or("Missing output_path")?;
     let task = ctx.db.update_task(
         task_id, None, None, None, None, None, None, Some(output_path), None,
-        None, None, None, None, None,
+        None, None, None, None, None, None,
     ).await.map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Task {} not found", task_id))?;
     let role = agent_role(&ctx.db, agent_id).await;
@@ -230,6 +252,9 @@ async fn set_output_path(args: Value, ctx: &ToolContext) -> Result<Value, String
 async fn heartbeat(args: Value, ctx: &ToolContext) -> Result<Value, String> {
     let agent_id = args["agent_id"].as_str().ok_or("Missing agent_id")?;
     let ts = ctx.db.heartbeat(agent_id).await.map_err(|e| e.to_string())?;
+    if let Ok(Some(agent)) = ctx.db.get_agent(agent_id).await {
+        ctx.metrics.agent_heartbeat(&agent.role);
+    }
     Ok(serde_json::json!({"message": "Heartbeat received", "agent_id": agent_id, "timestamp": ts}))
 }
 
@@ -244,7 +269,7 @@ async fn create_branch(args: Value, ctx: &ToolContext) -> Result<Value, String> 
 
     let task = ctx.db.update_task(
         task_id, None, None, None, None, None, None, None, None,
-        Some(branch_name), Some(base_branch), None, None, None,
+        Some(branch_name), Some(base_branch), None, None, None, None,
     ).await.map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Task {} not found", task_id))?;
 
@@ -272,6 +297,7 @@ async fn record_commit(args: Value, ctx: &ToolContext) -> Result<Value, String> 
     let commit = ctx.db.add_commit(task_id, Some(agent_id), hash, message)
         .await.map_err(|e| e.to_string())?;
 
+    ctx.metrics.commit_created();
     info!(agent_id, task_id, hash, message, "commit recorded");
     let role = agent_role(&ctx.db, agent_id).await;
     let entry = ctx.db.add_activity(task_id, Some(agent_id), role.as_deref(), "committed",
@@ -294,9 +320,77 @@ async fn request_review(args: Value, ctx: &ToolContext) -> Result<Value, String>
     let commit_hash = args["commit_hash"].as_str();
     let note = args["note"].as_str().unwrap_or("Ready for review");
 
+    // Verify the commit actually exists in the repo before accepting the review.
+    // This catches hallucinated commit hashes.
+    if let (Some(new_hash), Some(ref repo_path)) = (commit_hash, &ctx.repo_path) {
+        let check = tokio::process::Command::new("git")
+            .args(["-C", repo_path, "cat-file", "-e", &format!("{}^{{commit}}", new_hash)])
+            .output()
+            .await
+            .map_err(|e| format!("git cat-file failed: {}", e))?;
+        if !check.status.success() {
+            return Err(format!(
+                "Commit {} does not exist in the repository. \
+                 You must provide a real commit hash from your worktree. \
+                 Run `git log --oneline -5` in your worktree to see recent commits.",
+                &new_hash[..new_hash.len().min(12)]
+            ));
+        }
+    }
+
+    // When resubmitting after reviewer feedback, enforce that the note contains
+    // a "Round N:" line for every prior changes_requested entry.
+    {
+        let activity = ctx.db.get_activity_for_task(task_id).await.unwrap_or_default();
+        let last_blocked = activity.iter().rposition(|e| e.action == "blocked")
+            .map(|i| i + 1).unwrap_or(0);
+        let feedback_rounds = activity[last_blocked..].iter()
+            .filter(|e| e.action == "changes_requested")
+            .count();
+        if feedback_rounds > 0 {
+            let note_lower = note.to_lowercase();
+            let rounds_addressed = (1..=feedback_rounds)
+                .filter(|n| note_lower.contains(&format!("round {}:", n)))
+                .count();
+            if rounds_addressed < feedback_rounds {
+                return Err(format!(
+                    "Your note addresses {}/{} feedback rounds. \
+                     Add a 'Round N: fixed <what> in <file>:<line> — test: <test_name>' \
+                     line for every round before resubmitting.",
+                    rounds_addressed, feedback_rounds
+                ));
+            }
+        }
+    }
+
+    // Reject if the coder is resubmitting the exact same commit that was
+    // already rejected by a reviewer. They must push new commits first.
+    if let Some(new_hash) = commit_hash {
+        let current = ctx.db.get_task(task_id).await.map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("Task {} not found", task_id))?;
+        if let Some(ref existing_hash) = current.latest_commit {
+            // Check activity log — if there's a changes_requested entry after
+            // the last commit was recorded, this is a stale resubmission.
+            let activity = ctx.db.get_activity_for_task(task_id).await
+                .unwrap_or_default();
+            let last_changes_requested = activity.iter().rposition(|e| e.action == "changes_requested");
+            let last_commit_recorded = activity.iter().rposition(|e| e.action == "committed");
+            let is_stale_resubmission = existing_hash == new_hash
+                && last_changes_requested.is_some()
+                && last_changes_requested > last_commit_recorded;
+            if is_stale_resubmission {
+                return Err(format!(
+                    "Commit {} was already reviewed and changes were requested. \
+                     You must make new commits that address the reviewer feedback before calling request_review again.",
+                    &new_hash[..new_hash.len().min(8)]
+                ));
+            }
+        }
+    }
+
     let task = ctx.db.update_task(
         task_id, None, None, Some("in_review"), None, None, None, None, None,
-        None, None, commit_hash, None, None,
+        None, None, commit_hash, None, None, None,
     ).await.map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Task {} not found", task_id))?;
 
@@ -347,6 +441,16 @@ async fn get_review_target(args: Value, ctx: &ToolContext) -> Result<Value, Stri
         vec!["# No branch recorded yet".to_string()]
     };
 
+    // Collect all prior changes_requested entries since the last blocked event,
+    // so the reviewer knows exactly what to verify was fixed.
+    let last_blocked = task.activity.iter().rposition(|e| e.action == "blocked")
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let prior_feedback: Vec<&str> = task.activity[last_blocked..].iter()
+        .filter(|e| e.action == "changes_requested")
+        .filter_map(|e| e.detail.as_deref())
+        .collect();
+
     Ok(serde_json::json!({
         "task": task,
         "review_target": {
@@ -355,7 +459,8 @@ async fn get_review_target(args: Value, ctx: &ToolContext) -> Result<Value, Stri
             "latest_commit": task.task.latest_commit,
             "commit_count": task.task.commit_count,
             "commits": task.commits,
-            "commands": commands
+            "commands": commands,
+            "prior_feedback": prior_feedback
         }
     }))
 }
@@ -368,7 +473,7 @@ async fn approve_review(args: Value, ctx: &ToolContext) -> Result<Value, String>
 
     let task = ctx.db.update_task(
         task_id, None, None, Some("testing"), None, None, None, None, None,
-        None, None, None, None, None,
+        None, None, None, None, None, None,
     ).await.map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Task {} not found", task_id))?;
 
@@ -379,20 +484,53 @@ async fn approve_review(args: Value, ctx: &ToolContext) -> Result<Value, String>
     let entry = ctx.db.add_activity(task_id, Some(agent_id), role.as_deref(), "approved",
         Some(comment)).await.map_err(|e| e.to_string())?;
 
+    ctx.metrics.review_approved();
     broadcast(ctx, "task_updated", &serde_json::json!(task));
     broadcast(ctx, "activity_added", &serde_json::json!(entry));
     Ok(serde_json::json!({"message": "Review approved, task moved to testing", "task": task}))
 }
 
 /// Reviewer requests changes — requeues for coder, clears reviewer assignment.
+const MAX_REVIEW_CYCLES: usize = 5;
+
 async fn request_changes(args: Value, ctx: &ToolContext) -> Result<Value, String> {
     let agent_id = args["agent_id"].as_str().ok_or("Missing agent_id")?;
     let task_id = args["task_id"].as_str().ok_or("Missing task_id")?;
     let feedback = args["feedback"].as_str().ok_or("Missing feedback")?;
 
+    // Count changes_requested entries since the last time the task was blocked
+    // (or from the beginning if it has never been blocked). This means a human
+    // can intervene by dragging the task out of blocked — the counter resets.
+    let prior_rejections = ctx.db.get_activity_for_task(task_id).await
+        .map(|entries| {
+            let since = entries.iter().rposition(|e| e.action == "blocked")
+                .map(|i| i + 1)
+                .unwrap_or(0);
+            entries[since..].iter().filter(|e| e.action == "changes_requested").count()
+        })
+        .unwrap_or(0);
+
+    let (new_status, new_role, message) = if prior_rejections >= MAX_REVIEW_CYCLES {
+        (
+            "blocked",
+            None::<&str>,
+            format!(
+                "Task blocked after {} review cycles without resolution. Last feedback: {}",
+                prior_rejections + 1,
+                feedback
+            ),
+        )
+    } else {
+        (
+            "backlog",
+            Some("coder"),
+            format!("Changes requested, task moved to backlog for coder and reviewer unassigned"),
+        )
+    };
+
     let task = ctx.db.update_task(
-        task_id, None, None, Some("backlog"), None, Some("coder"), Some(""), None, None,
-        None, None, None, None, None,
+        task_id, None, None, Some(new_status), None, new_role, Some(""), None, None,
+        None, None, None, None, None, None,
     ).await.map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Task {} not found", task_id))?;
 
@@ -400,13 +538,19 @@ async fn request_changes(args: Value, ctx: &ToolContext) -> Result<Value, String
         .await.map_err(|e| e.to_string())?;
 
     let role = agent_role(&ctx.db, agent_id).await;
-    let entry = ctx.db.add_activity(task_id, Some(agent_id), role.as_deref(), "changes_requested",
+    let action = if new_status == "blocked" { "blocked" } else { "changes_requested" };
+    let entry = ctx.db.add_activity(task_id, Some(agent_id), role.as_deref(), action,
         Some(feedback)).await.map_err(|e| e.to_string())?;
 
+    if new_status == "blocked" {
+        ctx.metrics.task_blocked();
+    } else {
+        ctx.metrics.review_changes_requested();
+    }
     broadcast(ctx, "task_updated", &serde_json::json!(task));
     broadcast(ctx, "activity_added", &serde_json::json!(entry));
     Ok(serde_json::json!({
-        "message": "Changes requested, task moved to backlog for coder and reviewer unassigned",
+        "message": message,
         "task": task,
         "feedback": feedback
     }))
@@ -422,7 +566,7 @@ async fn setup_worktree(args: Value, ctx: &ToolContext) -> Result<Value, String>
 
     let task = ctx.db.update_task(
         task_id, None, None, None, None, None, None, None, None,
-        Some(branch_name), Some(base_branch), None, None, Some(worktree_path),
+        Some(branch_name), Some(base_branch), None, None, Some(worktree_path), None,
     ).await.map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Task {} not found", task_id))?;
 
@@ -451,7 +595,7 @@ async fn set_pr_url(args: Value, ctx: &ToolContext) -> Result<Value, String> {
 
     let task = ctx.db.update_task(
         task_id, None, None, None, None, None, None, None, None,
-        None, None, None, Some(pr_url), None,
+        None, None, None, Some(pr_url), None, None,
     ).await.map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Task {} not found", task_id))?;
 
@@ -613,7 +757,7 @@ pub fn tool_definitions() -> serde_json::Value {
         },
         {
             "name": "create_task",
-            "description": "Create a new task (agents can spawn subtasks).",
+            "description": "Create a new task (agents can spawn subtasks). Use dependencies to list task IDs that must be Done before this task can be assigned.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -622,7 +766,8 @@ pub fn tool_definitions() -> serde_json::Value {
                     "description": {"type": "string"},
                     "priority": {"type": "string", "enum": ["low","medium","high","critical"]},
                     "assigned_role": {"type": "string", "enum": ["coder","reviewer","tester","docs_writer"]},
-                    "tags": {"type": "array", "items": {"type": "string"}}
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                    "dependencies": {"type": "array", "items": {"type": "string"}, "description": "Task IDs that must be in Done status before this task can be assigned to an agent"}
                 },
                 "required": ["agent_id","title"]
             }

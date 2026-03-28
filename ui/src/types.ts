@@ -14,6 +14,7 @@ export interface Task {
   updated_at: string
   output_path?: string
   tags: string[]
+  dependencies: string[]
   // git
   branch_name?: string
   base_branch: string

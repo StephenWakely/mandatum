@@ -7,13 +7,13 @@ MANDATUM_REST_URL="${MANDATUM_REST_URL:-http://localhost:3001}"
 
 mcp_tool_call() {
   local tool_name="$1"
-  local args_json="${2:-{}}"
+  local args_json="${2-}"
+  [ -z "$args_json" ] && args_json='{}'
   local payload response
 
-  payload="$(jq -cn \
+  payload="$(printf '%s' "$args_json" | jq -c \
     --arg name "$tool_name" \
-    --argjson arguments "$args_json" \
-    '{jsonrpc:"2.0", id:1, method:"tools/call", params:{name:$name, arguments:$arguments}}')"
+    '{jsonrpc:"2.0", id:1, method:"tools/call", params:{name:$name, arguments:.}}')"
 
   response="$(curl -sf \
     -H 'Content-Type: application/json' \
@@ -106,6 +106,15 @@ ensure_worktree() {
   mkdir -p "$(dirname "$abs_worktree")"
 
   if git -C "$abs_worktree" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    # For detached-HEAD worktrees (reviewer/tester), advance to the current branch tip
+    # so the agent always sees the latest commits, not whatever was there last cycle.
+    if [ "$mode" = "detach" ]; then
+      local tip
+      tip="$(git -C "$PROJECT_DIR" rev-parse "$branch_name" 2>/dev/null || true)"
+      if [ -n "$tip" ]; then
+        git -C "$abs_worktree" checkout --detach "$tip" >/dev/null 2>&1 || true
+      fi
+    fi
     printf '%s\n' "$abs_worktree"
     return 0
   fi

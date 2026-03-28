@@ -1,6 +1,7 @@
 mod db;
 mod git;
 mod mcp;
+mod metrics;
 mod sse;
 mod tools;
 
@@ -18,6 +19,7 @@ use tower_http::services::{ServeDir, ServeFile};
 use tracing_subscriber::EnvFilter;
 
 use db::Database;
+use metrics::Metrics;
 use sse::SseBroadcaster;
 
 #[derive(Clone)]
@@ -26,6 +28,7 @@ pub struct AppState {
     pub broadcaster: SseBroadcaster,
     pub repo_path: Option<String>,
     pub base_branch: String,
+    pub metrics: Arc<Metrics>,
 }
 
 struct Config {
@@ -129,7 +132,8 @@ async fn main() {
 
     let db = Database::new(&cfg.db_path).await.expect("Failed to open database");
     let broadcaster = SseBroadcaster::new();
-    let state = Arc::new(AppState { db, broadcaster, repo_path: cfg.repo_path.clone(), base_branch: cfg.base_branch.clone() });
+    let metrics = Arc::new(Metrics::new());
+    let state = Arc::new(AppState { db, broadcaster, repo_path: cfg.repo_path.clone(), base_branch: cfg.base_branch.clone(), metrics });
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -232,25 +236,33 @@ struct CreateTaskBody {
     description: Option<String>,
     priority: Option<String>,
     assigned_role: Option<String>,
+    branch_name: Option<String>,
     tags: Option<Vec<String>>,
+    dependencies: Option<Vec<String>>,
 }
 
 async fn create_task_handler(
     State(s): State<Arc<AppState>>,
     Json(body): Json<CreateTaskBody>,
 ) -> impl IntoResponse {
+    let branch_name = body.branch_name
+        .as_deref()
+        .filter(|s| !s.is_empty());
     match s.db.create_task(
         None,
         &body.title,
         body.description.as_deref(),
         body.priority.as_deref().unwrap_or("medium"),
         body.assigned_role.as_deref(),
+        branch_name,
         &body.tags.unwrap_or_default(),
+        &body.dependencies.unwrap_or_default(),
     ).await {
         Ok(task) => {
             s.broadcaster.broadcast(
                 serde_json::json!({"event":"task_created","data":task}).to_string()
             );
+            s.metrics.task_created();
             (StatusCode::CREATED, Json(task)).into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
@@ -274,6 +286,7 @@ struct UpdateTaskBody {
     latest_commit: Option<String>,
     pr_url: Option<String>,
     worktree_path: Option<String>,
+    dependencies: Option<Vec<String>>,
 }
 
 async fn update_task_handler(
@@ -281,6 +294,13 @@ async fn update_task_handler(
     Path(id): Path<String>,
     Json(body): Json<UpdateTaskBody>,
 ) -> impl IntoResponse {
+    // Pre-fetch only when status is changing so we can emit from/to metric.
+    let prev_status = if body.status.is_some() {
+        s.db.get_task(&id).await.ok().flatten().map(|t| t.status)
+    } else {
+        None
+    };
+
     match s.db.update_task(
         &id,
         body.title.as_deref(),
@@ -296,28 +316,38 @@ async fn update_task_handler(
         body.latest_commit.as_deref(),
         body.pr_url.as_deref(),
         body.worktree_path.as_deref(),
+        body.dependencies.as_deref(),
     ).await {
         Ok(Some(task)) => {
             s.broadcaster.broadcast(
                 serde_json::json!({"event":"task_updated","data":task}).to_string()
             );
+            if let (Some(ref from), Some(ref to)) = (&prev_status, &body.status) {
+                if from != to {
+                    s.metrics.task_status_changed(from, to);
+                }
+            }
+            if body.status.as_deref() == Some("done") {
+                s.metrics.task_done(&task.title, &task.created_at);
+            }
             // Auto-merge when task is marked done via REST
             if body.status.as_deref() == Some("done") {
                 if let (Some(ref repo_path), Some(ref branch)) = (&s.repo_path, &task.branch_name) {
                     let base = s.base_branch.clone();
-                    let merge_msg = format!("Merge branch '{}' — task {} done", branch, id);
+                    let merge_msg = format!("Merge '{}': {}", branch, task.title);
                     match git::merge_branch(repo_path, branch, &base, &merge_msg).await {
                         Ok(hash) => {
                             tracing::info!("Auto-merged {} into {} ({})", branch, base, &hash[..hash.len().min(8)]);
                             let _ = s.db.add_activity(&id, None, None, "merged",
                                 Some(&format!("Merged '{}' into '{}' ({})", branch, base, &hash[..hash.len().min(8)])))
                                 .await;
+                            git::cleanup_task_worktrees(repo_path, branch).await;
                         }
                         Err(e) => {
                             tracing::warn!("Auto-merge failed for task {}: {}", id, e);
                             let _ = s.db.update_task(
                                 &id, None, None, Some("blocked"), None, None, None, None, None,
-                                None, None, None, None, None,
+                                None, None, None, None, None, None,
                             ).await;
                             let _ = s.db.add_activity(&id, None, None, "merge_failed",
                                 Some(&format!("Auto-merge failed: {}", e)))

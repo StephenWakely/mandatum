@@ -80,9 +80,25 @@ pub async fn merge_branch(
         return Err(format!("git update-ref: {}", stderr));
     }
 
+    // 5. Update the main working tree to match the new HEAD.
+    //    update-ref moves the branch pointer but leaves the working tree and
+    //    index pointing at the old commit.  reset --hard brings them in sync.
+    info!(repo = repo_path, commit = %hash, "merge: resetting main worktree to new HEAD");
+    let reset = Command::new("git")
+        .args(["-C", repo_path, "reset", "--hard", "HEAD"])
+        .output()
+        .await
+        .map_err(|e| format!("git reset failed: {}", e))?;
+
+    if !reset.status.success() {
+        let stderr = String::from_utf8_lossy(&reset.stderr).trim().to_string();
+        warn!(error = %stderr, "merge: reset --hard failed (ref was updated, working tree may be stale)");
+        // Non-fatal: the ref is correct, just the working tree lags
+    }
+
     info!(branch, base = base_branch, commit = %hash, "merge: success");
 
-    // 5. Clean up
+    // 6. Clean up
     info!(worktree = %tmp_str, "merge: removing temp worktree");
     let _ = cleanup_worktree(repo_path, &tmp_str).await;
 
@@ -96,4 +112,25 @@ async fn cleanup_worktree(repo_path: &str, worktree: &str) {
         .await;
     // Belt-and-suspenders: remove the directory if git didn't
     let _ = tokio::fs::remove_dir_all(worktree).await;
+}
+
+/// Remove all agent worktrees associated with a task branch.
+/// Worktrees are named `.worktrees/<safe_branch>` with optional suffixes
+/// like `-review`, `-test`, `-docs` for downstream agents.
+pub async fn cleanup_task_worktrees(repo_path: &str, branch: &str) {
+    let safe = branch.replace('/', "__");
+    let suffixes = ["", "-review", "-test", "-docs"];
+    for suffix in suffixes {
+        let rel = format!(".worktrees/{}{}", safe, suffix);
+        let abs = format!("{}/{}", repo_path, rel);
+        if tokio::fs::metadata(&abs).await.is_ok() {
+            info!(worktree = %abs, "cleanup: removing task worktree");
+            cleanup_worktree(repo_path, &abs).await;
+        }
+    }
+    // Prune stale worktree metadata from git's internal records
+    let _ = Command::new("git")
+        .args(["-C", repo_path, "worktree", "prune"])
+        .output()
+        .await;
 }

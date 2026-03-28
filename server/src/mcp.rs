@@ -166,6 +166,7 @@ async fn dispatch(
                 broadcaster: state.broadcaster.clone(),
                 repo_path: state.repo_path.clone(),
                 base_branch: state.base_branch.clone(),
+                metrics: state.metrics.clone(),
             };
 
             let response = match handle_tool_call(&name, arguments, &ctx).await {
@@ -314,6 +315,7 @@ mod tests {
             broadcaster: SseBroadcaster::new(),
             repo_path: None,
             base_branch: "main".to_string(),
+            metrics: Arc::new(crate::metrics::Metrics::new()),
         });
         create_router(state)
     }

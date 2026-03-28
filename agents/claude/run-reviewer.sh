@@ -25,6 +25,8 @@ echo "[reviewer] Log file       : $LOG_FILE"
 echo "[reviewer] Press Ctrl-C to stop."
 echo ""
 
+register_agent_role "reviewer"
+
 while true; do
   if stop_requested_rest; then
     echo "[reviewer/$AGENT_ID] Stop requested. Exiting."
@@ -34,7 +36,7 @@ while true; do
   echo "[reviewer/$AGENT_ID] Starting review cycle at $(date '+%H:%M:%S')"
 
   task_json="$(claim_next_task "reviewer" 2>>"$LOG_FILE" || true)"
-  task_id="$(jq -er '.task.id' <<<"$task_json" 2>/dev/null || true)"
+  task_id="$(jq -r '.task.id // empty' <<<"$task_json" 2>/dev/null || true)"
   if [ -z "$task_id" ]; then
     echo "[reviewer/$AGENT_ID] No task available." | tee -a "$LOG_FILE"
     heartbeat_agent
@@ -53,7 +55,7 @@ while true; do
   fi
 
   worktree_rel=".worktrees/$(safe_worktree_name "$branch_name" "-review")"
-  worktree_dir="$(ensure_worktree "$branch_name" "$worktree_rel" "detach" 2>>"$LOG_FILE" || true)"
+  worktree_dir="$(ensure_worktree "$branch_name" "$worktree_rel" "branch" 2>>"$LOG_FILE" || true)"
   if [ -z "$worktree_dir" ]; then
     echo "[reviewer/$AGENT_ID] Failed to prepare review worktree for $branch_name." | tee -a "$LOG_FILE"
     heartbeat_agent
@@ -64,6 +66,35 @@ while true; do
   record_worktree_setup "$task_id" "$branch_name" "$worktree_rel" "$base_branch"
 
   title="$(jq -r '.task.task.title // .task.title // "(untitled task)"' <<<"$review_json")"
+
+  # Extract prior feedback that the coder was asked to fix
+  prior_feedback="$(jq -r '
+    .review_target.prior_feedback
+    | if length > 0 then
+        to_entries
+        | map("[\(.key + 1)] \(.value)")
+        | join("\n\n")
+      else "" end
+  ' <<<"$review_json" 2>/dev/null || true)"
+
+  PRIOR_FEEDBACK_SECTION=""
+  if [ -n "$prior_feedback" ]; then
+    PRIOR_FEEDBACK_SECTION="$(cat <<FEEDBACK
+
+MANDATORY CHECKLIST — This task was previously returned for changes. Before doing anything else, verify each of the following points is fixed in the code. Use grep, cat, or git show to confirm with your own eyes. Do NOT approve if any point is unresolved.
+
+$prior_feedback
+
+For each point above:
+- Find the relevant file and line — confirm the fix is present in the actual code
+- Find the test the coder claims proves the fix — run it and confirm it passes
+- If the fix is missing, call request_changes immediately citing the unresolved point(s)
+- If the fix is present but has no test, write the test yourself now, commit it, then continue
+- Only proceed to a general review once all prior feedback is confirmed fixed and tested
+FEEDBACK
+)"
+  fi
+
   PROMPT="$(cat <<EOF
 You are a code reviewer agent. Your agent_id is "$AGENT_ID".
 The shell already registered you, claimed the task, fetched the review target, and prepared an isolated review worktree.
@@ -74,11 +105,12 @@ Task ID: $task_id
 Branch under review: $branch_name
 Base branch: $base_branch
 Title: $title
-
+$PRIOR_FEEDBACK_SECTION
 Use the configured MCP server via the existing Claude MCP config.
 Do not call register_agent, get_next_task, get_review_target, create_branch, or setup_worktree for this task unless you are explicitly repairing broken local state.
 Review the changes in "$worktree_dir".
 Log findings with add_task_comment.
+If you write any tests, commit them with git and call record_commit with the hash and message.
 If the code is correct and complete, call approve_review.
 If changes are needed, call request_changes with specific actionable feedback.
 Call heartbeat while working.

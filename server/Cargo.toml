@@ -8,6 +8,7 @@ name = "mandatum-server"
 path = "src/main.rs"
 
 [dependencies]
+dogstatsd-rs = { path = "/home/stephenwakely/src/dogstatsd/dogstatsd-rs" }
 axum = { version = "0.7", features = ["macros"] }
 tokio = { version = "1", features = ["full"] }
 tokio-rusqlite = "0.5"

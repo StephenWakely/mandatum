@@ -112,6 +112,7 @@ export default function Board({ onTaskSelect, selectedTask }: BoardProps) {
                     key={task.id}
                     task={task}
                     agent={task.assigned_agent_id ? agentMap[task.assigned_agent_id] : undefined}
+                    allTasks={tasks}
                     onClick={() => onTaskSelect(task)}
                     onDragStart={e => handleDragStart(e, task.id)}
                   />

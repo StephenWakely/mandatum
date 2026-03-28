@@ -1,7 +1,7 @@
 import { Task, TaskPriority, AgentRole, Agent } from '../types'
 import AgentBadge from './AgentBadge'
 import { formatDistanceToNow } from 'date-fns'
-import { GitBranch, GitCommit, AlertTriangle, Zap } from 'lucide-react'
+import { GitBranch, GitCommit, AlertTriangle, Zap, Link } from 'lucide-react'
 
 export const PRIORITY_CONFIG: Record<TaskPriority, { label: string; bg: string; text: string; dot: string }> = {
   critical: { label: 'Critical', bg: 'bg-red-900/60',    text: 'text-red-300',    dot: 'bg-red-400'    },
@@ -20,6 +20,7 @@ function agentIsStale(agent: Agent | undefined): boolean {
 interface TaskCardProps {
   task: Task
   agent?: Agent
+  allTasks?: Task[]
   onClick: () => void
   onDragStart: (e: React.DragEvent) => void
 }
@@ -31,11 +32,16 @@ function agentIsActive(agent: Agent | undefined): boolean {
   return Date.now() - new Date(agent.last_seen).getTime() < ACTIVE_AGENT_MS
 }
 
-export default function TaskCard({ task, agent, onClick, onDragStart }: TaskCardProps) {
+export default function TaskCard({ task, agent, allTasks = [], onClick, onDragStart }: TaskCardProps) {
   const p = PRIORITY_CONFIG[task.priority]
   const stale = agentIsStale(agent)
   const claimed = !!task.assigned_agent_id
   const active = agentIsActive(agent)
+  const blockedByDeps = task.dependencies.length > 0 &&
+    task.dependencies.some(depId => {
+      const dep = allTasks.find(t => t.id === depId)
+      return !dep || dep.status !== 'done'
+    })
 
   return (
     <div
@@ -77,9 +83,10 @@ export default function TaskCard({ task, agent, onClick, onDragStart }: TaskCard
         {task.assigned_role && <AgentBadge role={task.assigned_role as AgentRole} />}
       </div>
 
-      <p className="text-sm font-medium text-slate-100 leading-snug mb-2 line-clamp-2 group-hover:text-white">
+      <p className="text-sm font-medium text-slate-100 leading-snug mb-1 line-clamp-2 group-hover:text-white">
         {task.title}
       </p>
+      <p className="text-xs font-mono text-slate-600 mb-2 truncate">{task.id.slice(0, 8)}</p>
 
       {task.tags.length > 0 && (
         <div className="flex flex-wrap gap-1 mb-2">
@@ -89,6 +96,15 @@ export default function TaskCard({ task, agent, onClick, onDragStart }: TaskCard
           {task.tags.length > 3 && (
             <span className="text-xs text-slate-500">+{task.tags.length - 3}</span>
           )}
+        </div>
+      )}
+
+      {/* Dependencies */}
+      {task.dependencies.length > 0 && (
+        <div className={`flex items-center gap-1 text-xs mt-1 ${blockedByDeps ? 'text-amber-400' : 'text-emerald-500'}`}>
+          <Link className="w-3 h-3 shrink-0" />
+          <span>{task.dependencies.length} dep{task.dependencies.length !== 1 ? 's' : ''}</span>
+          {blockedByDeps && <span className="ml-0.5 text-amber-500">· waiting</span>}
         </div>
       )}
 

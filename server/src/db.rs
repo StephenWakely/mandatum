@@ -25,6 +25,7 @@ pub struct Task {
     pub commit_count: i64,
     pub pr_url: Option<String>,
     pub worktree_path: Option<String>,
+    pub dependencies: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,6 +104,8 @@ fn queue_status_for_role(role: Option<&str>) -> &'static str {
 fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
     let tags_str: String = row.get::<_, String>(10).unwrap_or_else(|_| "[]".to_string());
     let tags: Vec<String> = serde_json::from_str(&tags_str).unwrap_or_default();
+    let deps_str: String = row.get::<_, String>(17).unwrap_or_else(|_| "[]".to_string());
+    let dependencies: Vec<String> = serde_json::from_str(&deps_str).unwrap_or_default();
     Ok(Task {
         id:                 row.get(0)?,
         title:              row.get(1)?,
@@ -121,12 +124,13 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
         commit_count:  row.get::<_, Option<i64>>(14).unwrap_or(None).unwrap_or(0),
         pr_url:        row.get(15).unwrap_or(None),
         worktree_path: row.get(16).unwrap_or(None),
+        dependencies,
     })
 }
 
 const TASK_SELECT: &str = "SELECT id, title, description, status, assigned_role, assigned_agent_id, \
     priority, created_at, updated_at, output_path, tags, \
-    branch_name, base_branch, latest_commit, commit_count, pr_url, worktree_path FROM tasks";
+    branch_name, base_branch, latest_commit, commit_count, pr_url, worktree_path, dependencies FROM tasks";
 
 #[derive(Clone)]
 pub struct Database {
@@ -145,6 +149,8 @@ impl Database {
         self.conn.call(|conn| {
             conn.execute_batch("
                 PRAGMA journal_mode=WAL;
+                PRAGMA wal_autocheckpoint=100;
+                PRAGMA synchronous=NORMAL;
                 CREATE TABLE IF NOT EXISTS tasks (
                     id TEXT PRIMARY KEY,
                     title TEXT NOT NULL,
@@ -192,6 +198,7 @@ impl Database {
             let _ = conn.execute("ALTER TABLE tasks ADD COLUMN commit_count INTEGER DEFAULT 0", []);
             let _ = conn.execute("ALTER TABLE tasks ADD COLUMN pr_url TEXT", []);
             let _ = conn.execute("ALTER TABLE tasks ADD COLUMN worktree_path TEXT", []);
+            let _ = conn.execute("ALTER TABLE tasks ADD COLUMN dependencies TEXT DEFAULT '[]'", []);
             let _ = conn.execute("ALTER TABLE agents ADD COLUMN stop_requested INTEGER NOT NULL DEFAULT 0", []);
             Ok(())
         }).await
@@ -329,17 +336,20 @@ impl Database {
         description: Option<&str>,
         priority: &str,
         assigned_role: Option<&str>,
+        branch_name: Option<&str>,
         tags: &[String],
+        dependencies: &[String],
     ) -> Result<Task, tokio_rusqlite::Error> {
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
         let tags_json = serde_json::to_string(tags).unwrap_or_else(|_| "[]".to_string());
+        let deps_json = serde_json::to_string(dependencies).unwrap_or_else(|_| "[]".to_string());
 
         let task = Task {
             id: id.clone(),
             title: title.to_string(),
             description: description.map(|s| s.to_string()),
-            status: "backlog".to_string(),
+            status: queue_status_for_role(assigned_role).to_string(),
             assigned_role: assigned_role.map(|s| s.to_string()),
             assigned_agent_id: None,
             priority: priority.to_string(),
@@ -347,12 +357,13 @@ impl Database {
             updated_at: now.clone(),
             output_path: None,
             tags: tags.to_vec(),
-            branch_name: None,
+            branch_name: branch_name.map(|s| s.to_string()),
             base_branch: "main".to_string(),
             latest_commit: None,
             commit_count: 0,
             pr_url: None,
             worktree_path: None,
+            dependencies: dependencies.to_vec(),
         };
 
         let t = task.clone();
@@ -362,13 +373,13 @@ impl Database {
             conn.execute(
                 "INSERT INTO tasks (id, title, description, status, assigned_role, assigned_agent_id, \
                  priority, created_at, updated_at, output_path, tags, branch_name, base_branch, \
-                 latest_commit, commit_count, pr_url, worktree_path) \
-                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+                 latest_commit, commit_count, pr_url, worktree_path, dependencies) \
+                 VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
                 params![
                     t.id, t.title, t.description, t.status, t.assigned_role, t.assigned_agent_id,
                     t.priority, t.created_at, t.updated_at, t.output_path, tags_json,
                     t.branch_name, t.base_branch, t.latest_commit, t.commit_count, t.pr_url,
-                    t.worktree_path
+                    t.worktree_path, deps_json
                 ],
             )?;
             let aid = Uuid::new_v4().to_string();
@@ -400,6 +411,7 @@ impl Database {
         latest_commit: Option<&str>,
         pr_url: Option<&str>,
         worktree_path: Option<&str>,
+        dependencies: Option<&[String]>,
     ) -> Result<Option<Task>, tokio_rusqlite::Error> {
         let id = id.to_string();
         let title = title.map(|s| s.to_string());
@@ -412,11 +424,14 @@ impl Database {
         let assigned_agent_id = assigned_agent_id.filter(|s| !s.is_empty()).map(|s| s.to_string());
         let output_path = output_path.map(|s| s.to_string());
         let tags = tags.map(|t| t.to_vec());
-        let branch_name = branch_name.map(|s| s.to_string());
+        // Sentinel: empty string means "clear branch_name to NULL"
+        let clear_branch = branch_name.map_or(false, |s| s.is_empty());
+        let branch_name = branch_name.filter(|s| !s.is_empty()).map(|s| s.to_string());
         let base_branch = base_branch.map(|s| s.to_string());
         let latest_commit = latest_commit.map(|s| s.to_string());
         let pr_url = pr_url.map(|s| s.to_string());
         let worktree_path = worktree_path.map(|s| s.to_string());
+        let dependencies = dependencies.map(|d| d.to_vec());
 
         self.conn.call(move |conn| {
             let existing = conn.query_row(
@@ -446,24 +461,26 @@ impl Database {
             };
             let new_output_path        = output_path.or(existing.output_path);
             let new_tags               = tags.unwrap_or(existing.tags);
-            let new_branch_name        = branch_name.or(existing.branch_name);
+            let new_branch_name        = if clear_branch { None } else { branch_name.or(existing.branch_name) };
             let new_base_branch        = base_branch.unwrap_or(existing.base_branch);
             let new_latest_commit      = latest_commit.or(existing.latest_commit);
             let new_pr_url             = pr_url.or(existing.pr_url);
             let new_worktree_path      = worktree_path.or(existing.worktree_path);
+            let new_dependencies       = dependencies.unwrap_or(existing.dependencies.clone());
             let tags_json              = serde_json::to_string(&new_tags).unwrap_or_else(|_| "[]".to_string());
+            let deps_json              = serde_json::to_string(&new_dependencies).unwrap_or_else(|_| "[]".to_string());
             let now                    = Utc::now().to_rfc3339();
 
             conn.execute(
                 "UPDATE tasks SET title=?2, description=?3, status=?4, priority=?5, \
                  assigned_role=?6, assigned_agent_id=?7, output_path=?8, tags=?9, \
                  branch_name=?10, base_branch=?11, latest_commit=?12, pr_url=?13, \
-                 worktree_path=?14, updated_at=?1 WHERE id=?15",
+                 worktree_path=?14, dependencies=?15, updated_at=?1 WHERE id=?16",
                 params![
                     now, new_title, new_description, new_status, new_priority,
                     new_assigned_role, new_assigned_agent_id, new_output_path, tags_json,
                     new_branch_name, new_base_branch, new_latest_commit, new_pr_url,
-                    new_worktree_path, id
+                    new_worktree_path, deps_json, id
                 ],
             )?;
 
@@ -485,6 +502,7 @@ impl Database {
                 commit_count: existing.commit_count,
                 pr_url: new_pr_url,
                 worktree_path: new_worktree_path,
+                dependencies: new_dependencies,
             }))
         }).await
     }
@@ -578,6 +596,28 @@ impl Database {
                 stop_requested: row.get::<_, i64>(4)? != 0,
             }))?.collect::<Result<Vec<_>, _>>()?;
             Ok(agents)
+        }).await
+    }
+
+    pub async fn get_agent(&self, agent_id: &str) -> Result<Option<Agent>, tokio_rusqlite::Error> {
+        let agent_id = agent_id.to_string();
+        self.conn.call(move |conn| {
+            let result = conn.query_row(
+                "SELECT agent_id, role, last_seen, current_task_id, stop_requested FROM agents WHERE agent_id = ?1",
+                params![agent_id],
+                |row| Ok(Agent {
+                    agent_id: row.get(0)?,
+                    role: row.get(1)?,
+                    last_seen: row.get(2)?,
+                    current_task_id: row.get(3)?,
+                    stop_requested: row.get::<_, i64>(4)? != 0,
+                }),
+            );
+            match result {
+                Ok(agent) => Ok(Some(agent)),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(tokio_rusqlite::Error::Rusqlite(e)),
+            }
         }).await
     }
 
@@ -680,12 +720,18 @@ impl Database {
         }.to_string();
 
         self.conn.call(move |conn| {
+            // Exclude tasks whose dependencies are not all done.
+            // json_each expands the JSON array; NOT EXISTS ensures every dep is done.
             let task_id: Option<String> = conn.query_row(
-                "SELECT id FROM tasks \
-                 WHERE status = ?1 \
-                 AND (assigned_agent_id IS NULL OR assigned_agent_id = '') \
-                 ORDER BY CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END, \
-                 created_at ASC LIMIT 1",
+                "SELECT id FROM tasks t \
+                 WHERE t.status = ?1 \
+                 AND (t.assigned_agent_id IS NULL OR t.assigned_agent_id = '') \
+                 AND NOT EXISTS ( \
+                     SELECT 1 FROM json_each(t.dependencies) j \
+                     WHERE j.value NOT IN (SELECT id FROM tasks WHERE status = 'done') \
+                 ) \
+                 ORDER BY CASE t.priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END, \
+                 t.created_at ASC LIMIT 1",
                 params![target_status],
                 |row| row.get(0),
             ).optional()?;
@@ -694,9 +740,12 @@ impl Database {
                 None => Ok(None),
                 Some(tid) => {
                     let now = Utc::now().to_rfc3339();
+                    // Coders move tasks to in_progress; other roles keep the task
+                    // in their role-specific column status (in_review, testing, etc.)
+                    let claimed_status = if role == "coder" { "in_progress" } else { target_status.as_str() };
                     conn.execute(
-                        "UPDATE tasks SET assigned_agent_id = ?1, assigned_role = ?2, status = 'in_progress', updated_at = ?3 WHERE id = ?4",
-                        params![agent_id, role, now, tid],
+                        "UPDATE tasks SET assigned_agent_id = ?1, assigned_role = ?2, status = ?3, updated_at = ?4 WHERE id = ?5",
+                        params![agent_id, role, claimed_status, now, tid],
                     )?;
                     conn.execute(
                         "UPDATE agents SET current_task_id = ?1, last_seen = ?2 WHERE agent_id = ?3",

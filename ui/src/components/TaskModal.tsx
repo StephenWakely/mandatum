@@ -1,12 +1,12 @@
 import { useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { fetchTask, fetchCommits, fetchAgents, updateTask, deleteTask, resetTask } from '../api'
+import { fetchTask, fetchCommits, fetchAgents, fetchTasks, updateTask, deleteTask, resetTask } from '../api'
 import { Task, TaskStatus, TaskPriority, AgentRole, Agent, GIT_ACTIONS } from '../types'
 import AgentBadge from './AgentBadge'
 import { PRIORITY_CONFIG } from './TaskCard'
 import { formatDistanceToNow } from 'date-fns'
-import { X, Copy, Pencil, Trash2, ChevronDown, GitBranch, GitCommit, ExternalLink, FolderOpen, AlertTriangle, RotateCcw } from 'lucide-react'
+import { X, Copy, Pencil, Trash2, ChevronDown, GitBranch, GitCommit, ExternalLink, FolderOpen, AlertTriangle, RotateCcw, Link, CheckCircle2, Clock } from 'lucide-react'
 
 const STATUSES: TaskStatus[] = ['backlog', 'in_progress', 'in_review', 'testing', 'docs_needed', 'done', 'blocked']
 const PRIORITIES: TaskPriority[] = ['low', 'medium', 'high', 'critical']
@@ -42,6 +42,7 @@ export default function TaskModal({ task: initialTask, onClose }: TaskModalProps
     priority: initialTask.priority,
     assigned_role: initialTask.assigned_role ?? '' as AgentRole | '',
     tags: initialTask.tags.join(', '),
+    dependencies: initialTask.dependencies ?? [] as string[],
   })
 
   const { data: task = initialTask } = useQuery({
@@ -58,6 +59,11 @@ export default function TaskModal({ task: initialTask, onClose }: TaskModalProps
     queryKey: ['agents'],
     queryFn: fetchAgents,
     refetchInterval: 15_000,
+  })
+
+  const { data: allTasks = [] } = useQuery({
+    queryKey: ['tasks'],
+    queryFn: () => fetchTasks(),
   })
 
   const assignedAgent = task.assigned_agent_id
@@ -102,7 +108,17 @@ export default function TaskModal({ task: initialTask, onClose }: TaskModalProps
       priority: editForm.priority as TaskPriority,
       assigned_role: (editForm.assigned_role as AgentRole) || undefined,
       tags: editForm.tags ? editForm.tags.split(',').map(t => t.trim()).filter(Boolean) : [],
+      dependencies: editForm.dependencies,
     })
+  }
+
+  function toggleDepEdit(id: string) {
+    setEditForm(f => ({
+      ...f,
+      dependencies: f.dependencies.includes(id)
+        ? f.dependencies.filter(d => d !== id)
+        : [...f.dependencies, id],
+    }))
   }
 
   const handleStatusChange = (status: TaskStatus) => {
@@ -248,10 +264,21 @@ export default function TaskModal({ task: initialTask, onClose }: TaskModalProps
               {editing ? (
                 <textarea value={editForm.description} onChange={e => setEditForm(f => ({ ...f, description: e.target.value }))}
                   rows={3} className="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-sm text-slate-200 outline-none focus:border-indigo-500 resize-none" />
+              ) : task.description ? (
+                <div className="prose prose-invert prose-sm max-w-none text-slate-300
+                  prose-p:my-1 prose-p:leading-relaxed
+                  prose-headings:text-slate-200 prose-headings:font-semibold
+                  prose-h1:text-base prose-h2:text-sm prose-h3:text-sm
+                  prose-strong:text-slate-200
+                  prose-code:text-slate-300 prose-code:bg-slate-800 prose-code:px-1 prose-code:rounded prose-code:text-xs prose-code:before:content-none prose-code:after:content-none
+                  prose-pre:bg-slate-800 prose-pre:text-xs prose-pre:p-3 prose-pre:rounded-lg
+                  prose-ul:my-1 prose-ul:pl-4 prose-ol:my-1 prose-ol:pl-4 prose-li:my-0
+                  prose-a:text-indigo-400 prose-a:no-underline hover:prose-a:underline
+                  prose-blockquote:border-slate-600 prose-blockquote:text-slate-400">
+                  <ReactMarkdown>{task.description}</ReactMarkdown>
+                </div>
               ) : (
-                <p className="text-sm text-slate-300 leading-relaxed">
-                  {task.description ?? <span className="text-slate-600 italic">No description</span>}
-                </p>
+                <span className="text-slate-600 text-sm italic">No description</span>
               )}
             </div>
 
@@ -268,6 +295,59 @@ export default function TaskModal({ task: initialTask, onClose }: TaskModalProps
                     ? task.tags.map(tag => <span key={tag} className="text-xs bg-slate-800 text-slate-400 rounded px-2 py-0.5">{tag}</span>)
                     : <span className="text-slate-600 text-sm italic">None</span>}
                 </div>
+              )}
+            </div>
+
+            {/* Dependencies */}
+            <div>
+              <label className="text-xs text-slate-500 uppercase font-medium block mb-1.5">
+                Dependencies
+              </label>
+              {editing ? (
+                <div className="max-h-40 overflow-y-auto rounded-lg border border-slate-600 bg-slate-800/50 divide-y divide-slate-700">
+                  {(allTasks as Task[]).filter(t => t.id !== task.id).map(t => (
+                    <label key={t.id} className="flex items-center gap-2.5 px-3 py-2 cursor-pointer hover:bg-slate-700/50 transition-colors">
+                      <input
+                        type="checkbox"
+                        checked={editForm.dependencies.includes(t.id)}
+                        onChange={() => toggleDepEdit(t.id)}
+                        className="accent-indigo-500 w-3.5 h-3.5 shrink-0"
+                      />
+                      <span className="text-sm text-slate-300 truncate flex-1">{t.title}</span>
+                      <span className={`text-xs shrink-0 px-1.5 py-0.5 rounded ${
+                        t.status === 'done' ? 'text-emerald-400 bg-emerald-900/40' : 'text-slate-500 bg-slate-700'
+                      }`}>{t.status.replace(/_/g, ' ')}</span>
+                    </label>
+                  ))}
+                  {(allTasks as Task[]).filter(t => t.id !== task.id).length === 0 && (
+                    <p className="px-3 py-2 text-xs text-slate-600 italic">No other tasks</p>
+                  )}
+                </div>
+              ) : task.dependencies.length > 0 ? (
+                <div className="space-y-1.5">
+                  {task.dependencies.map(depId => {
+                    const dep = (allTasks as Task[]).find(t => t.id === depId)
+                    const done = dep?.status === 'done'
+                    return (
+                      <div key={depId} className={`flex items-center gap-2 rounded-md px-3 py-2 text-sm ${done ? 'bg-emerald-900/20 border border-emerald-800/40' : 'bg-slate-800 border border-slate-700'}`}>
+                        {done
+                          ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                          : <Clock className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                        }
+                        <span className={`flex-1 truncate ${done ? 'text-emerald-300' : 'text-slate-300'}`}>
+                          {dep ? dep.title : <span className="font-mono text-xs text-slate-500">{depId}</span>}
+                        </span>
+                        {dep && (
+                          <span className={`text-xs shrink-0 ${done ? 'text-emerald-500' : 'text-slate-500'}`}>
+                            {dep.status.replace(/_/g, ' ')}
+                          </span>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              ) : (
+                <p className="text-sm text-slate-600 italic">None</p>
               )}
             </div>
 

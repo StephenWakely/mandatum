@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { createTask } from '../api'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { createTask, fetchTasks } from '../api'
 import { TaskPriority, AgentRole } from '../types'
 import { X, PlusCircle } from 'lucide-react'
 
@@ -15,7 +15,14 @@ export default function CreateTaskModal({ onClose }: CreateTaskModalProps) {
     description: '',
     priority: 'medium' as TaskPriority,
     assigned_role: '' as AgentRole | '',
+    branch_name: '',
     tags: '',
+    dependencies: [] as string[],
+  })
+
+  const { data: allTasks = [] } = useQuery({
+    queryKey: ['tasks'],
+    queryFn: () => fetchTasks(),
   })
 
   const mutation = useMutation({
@@ -24,7 +31,9 @@ export default function CreateTaskModal({ onClose }: CreateTaskModalProps) {
       description: form.description || undefined,
       priority: form.priority,
       assigned_role: (form.assigned_role as AgentRole) || undefined,
+      branch_name: form.branch_name || undefined,
       tags: form.tags ? form.tags.split(',').map(t => t.trim()).filter(Boolean) : [],
+      dependencies: form.dependencies,
     }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['tasks'] })
@@ -32,6 +41,15 @@ export default function CreateTaskModal({ onClose }: CreateTaskModalProps) {
       onClose()
     },
   })
+
+  function toggleDependency(id: string) {
+    setForm(f => ({
+      ...f,
+      dependencies: f.dependencies.includes(id)
+        ? f.dependencies.filter(d => d !== id)
+        : [...f.dependencies, id],
+    }))
+  }
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
@@ -95,11 +113,45 @@ export default function CreateTaskModal({ onClose }: CreateTaskModalProps) {
           </div>
 
           <div>
+            <label className="text-xs text-slate-500 uppercase font-medium block mb-1">Branch</label>
+            <input value={form.branch_name} onChange={e => setForm(f => ({ ...f, branch_name: e.target.value }))}
+              placeholder="auto (leave blank for coder tasks)"
+              className="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-indigo-500 placeholder:text-slate-600 font-mono" />
+          </div>
+
+          <div>
             <label className="text-xs text-slate-500 uppercase font-medium block mb-1">Tags</label>
             <input value={form.tags} onChange={e => setForm(f => ({ ...f, tags: e.target.value }))}
               placeholder="auth, backend (comma-separated)"
               className="w-full bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white outline-none focus:border-indigo-500 placeholder:text-slate-600" />
           </div>
+
+          {allTasks.length > 0 && (
+            <div>
+              <label className="text-xs text-slate-500 uppercase font-medium block mb-1">
+                Depends on
+                {form.dependencies.length > 0 && (
+                  <span className="ml-1.5 text-indigo-400">({form.dependencies.length} selected)</span>
+                )}
+              </label>
+              <div className="max-h-36 overflow-y-auto rounded-lg border border-slate-600 bg-slate-800 divide-y divide-slate-700">
+                {allTasks.map(t => (
+                  <label key={t.id} className="flex items-center gap-2.5 px-3 py-2 cursor-pointer hover:bg-slate-700/50 transition-colors">
+                    <input
+                      type="checkbox"
+                      checked={form.dependencies.includes(t.id)}
+                      onChange={() => toggleDependency(t.id)}
+                      className="accent-indigo-500 w-3.5 h-3.5 shrink-0"
+                    />
+                    <span className="text-sm text-slate-300 truncate flex-1">{t.title}</span>
+                    <span className={`text-xs shrink-0 px-1.5 py-0.5 rounded ${
+                      t.status === 'done' ? 'text-emerald-400 bg-emerald-900/40' : 'text-slate-500 bg-slate-700'
+                    }`}>{t.status.replace(/_/g, ' ')}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
 
           <div className="flex gap-2 pt-1">
             <button type="submit" disabled={!form.title.trim() || mutation.isPending}

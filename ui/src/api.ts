@@ -24,7 +24,9 @@ export async function createTask(data: {
   description?: string
   priority?: TaskPriority
   assigned_role?: AgentRole
+  branch_name?: string
   tags?: string[]
+  dependencies?: string[]
 }): Promise<Task> {
   const res = await fetch(`${BASE}/tasks`, {
     method: 'POST',
@@ -42,6 +44,7 @@ export async function updateTask(id: string, data: Partial<{
   priority: TaskPriority
   assigned_role: AgentRole
   tags: string[]
+  dependencies: string[]
 }>): Promise<Task> {
   const res = await fetch(`${BASE}/tasks/${id}`, {
     method: 'PATCH',
