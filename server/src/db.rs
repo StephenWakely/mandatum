@@ -29,6 +29,28 @@ pub struct Task {
     pub dependencies: Vec<String>,
 }
 
+/// Lightweight task view returned by list_tasks — omits description and large fields.
+/// Use get_task to fetch the full record including description and activity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskSummary {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub assigned_role: Option<String>,
+    pub assigned_agent_id: Option<String>,
+    pub priority: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub claimed_at: Option<String>,
+    pub tags: Vec<String>,
+    pub branch_name: Option<String>,
+    pub base_branch: String,
+    pub latest_commit: Option<String>,
+    pub commit_count: i64,
+    pub pr_url: Option<String>,
+    pub dependencies: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskWithActivity {
     #[serde(flatten)]
@@ -232,6 +254,61 @@ impl Database {
             query.push_str(" ORDER BY created_at DESC");
             let mut stmt = conn.prepare(&query)?;
             let tasks = stmt.query_map([], row_to_task)?.collect::<Result<Vec<_>, _>>()?;
+            Ok(tasks)
+        }).await
+    }
+
+    pub async fn list_tasks_summary(
+        &self,
+        status: Option<String>,
+        role: Option<String>,
+        agent_id: Option<String>,
+    ) -> Result<Vec<TaskSummary>, tokio_rusqlite::Error> {
+        self.conn.call(move |conn| {
+            let mut query = "SELECT id, title, status, assigned_role, assigned_agent_id, \
+                             priority, created_at, updated_at, claimed_at, tags, \
+                             branch_name, base_branch, latest_commit, commit_count, pr_url, \
+                             dependencies FROM tasks".to_string();
+            let mut where_parts: Vec<String> = Vec::new();
+            if let Some(ref s) = status {
+                where_parts.push(format!("status = '{}'", s.replace('\'', "''")));
+            }
+            if let Some(ref r) = role {
+                where_parts.push(format!("assigned_role = '{}'", r.replace('\'', "''")));
+            }
+            if let Some(ref a) = agent_id {
+                where_parts.push(format!("assigned_agent_id = '{}'", a.replace('\'', "''")));
+            }
+            if !where_parts.is_empty() {
+                query.push_str(" WHERE ");
+                query.push_str(&where_parts.join(" AND "));
+            }
+            query.push_str(" ORDER BY created_at DESC");
+            let mut stmt = conn.prepare(&query)?;
+            let tasks = stmt.query_map([], |row| {
+                let tags_str: String = row.get(9)?;
+                let tags: Vec<String> = serde_json::from_str(&tags_str).unwrap_or_default();
+                let deps_str: String = row.get(15).unwrap_or_else(|_| "[]".to_string());
+                let dependencies: Vec<String> = serde_json::from_str(&deps_str).unwrap_or_default();
+                Ok(TaskSummary {
+                    id:                 row.get(0)?,
+                    title:              row.get(1)?,
+                    status:             row.get(2)?,
+                    assigned_role:      row.get(3)?,
+                    assigned_agent_id:  row.get(4)?,
+                    priority:           row.get(5)?,
+                    created_at:         row.get(6)?,
+                    updated_at:         row.get(7)?,
+                    claimed_at:         row.get(8)?,
+                    tags,
+                    branch_name:        row.get(10)?,
+                    base_branch:        row.get(11).unwrap_or_else(|_| "main".to_string()),
+                    latest_commit:      row.get(12)?,
+                    commit_count:       row.get(13).unwrap_or(0),
+                    pr_url:             row.get(14)?,
+                    dependencies,
+                })
+            })?.collect::<Result<Vec<_>, _>>()?;
             Ok(tasks)
         }).await
     }

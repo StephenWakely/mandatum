@@ -240,7 +240,7 @@ async fn list_tasks(args: Value, ctx: &ToolContext) -> Result<Value, String> {
     let status = args["status"].as_str().map(|s| s.to_string());
     let assigned_role = args["assigned_role"].as_str().map(|s| s.to_string());
     let assigned_agent_id = args["assigned_agent_id"].as_str().map(|s| s.to_string());
-    let tasks = ctx.db.list_tasks(status, assigned_role, assigned_agent_id)
+    let tasks = ctx.db.list_tasks_summary(status, assigned_role, assigned_agent_id)
         .await.map_err(|e| e.to_string())?;
     Ok(serde_json::json!({"tasks": tasks}))
 }
@@ -794,7 +794,7 @@ pub fn tool_definitions() -> serde_json::Value {
         },
         {
             "name": "list_tasks",
-            "description": "Query tasks with optional filters.",
+            "description": "Query tasks with optional filters. Returns summary fields only (no description). Call get_task with a specific task_id to retrieve the full description and activity log.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
