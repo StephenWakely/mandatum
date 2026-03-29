@@ -329,6 +329,19 @@ async fn update_task_handler(
             }
             if body.status.as_deref() == Some("done") {
                 s.metrics.task_done(&task.title, &task.created_at);
+                if let (Some(ref claimed_at), Some(ref role)) = (&task.claimed_at, &task.assigned_role) {
+                    if let Ok(claimed) = chrono::DateTime::parse_from_rfc3339(claimed_at) {
+                        let secs = chrono::Utc::now()
+                            .signed_duration_since(claimed.with_timezone(&chrono::Utc))
+                            .num_seconds();
+                        if secs >= 0 {
+                            s.metrics.task_claim_duration_seconds(role, secs as f64);
+                        }
+                    }
+                }
+            }
+            if let Ok(counts) = s.db.count_tasks_by_status().await {
+                s.metrics.queue_sizes(&counts);
             }
             // Auto-merge when task is marked done via REST
             if body.status.as_deref() == Some("done") {

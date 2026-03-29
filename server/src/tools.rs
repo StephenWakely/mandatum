@@ -82,6 +82,7 @@ async fn get_next_task(args: Value, ctx: &ToolContext) -> Result<Value, String> 
     match ctx.db.get_next_task_for_role(agent_id, role).await.map_err(|e| e.to_string())? {
         None => {
             info!(agent_id, role, "get_next_task: no tasks available");
+            ctx.metrics.task_poll_empty(role);
             Ok(serde_json::json!({
                 "message": format!("No tasks available for role '{}'", role),
                 "task": null
@@ -146,6 +147,19 @@ async fn update_task_status(args: Value, ctx: &ToolContext) -> Result<Value, Str
     }
     if status == "done" {
         ctx.metrics.task_done(&task.title, &task.created_at);
+        if let (Some(ref claimed_at), Some(ref role)) = (&task.claimed_at, &task.assigned_role) {
+            if let Ok(claimed) = chrono::DateTime::parse_from_rfc3339(claimed_at) {
+                let secs = chrono::Utc::now()
+                    .signed_duration_since(claimed.with_timezone(&chrono::Utc))
+                    .num_seconds();
+                if secs >= 0 {
+                    ctx.metrics.task_claim_duration_seconds(role, secs as f64);
+                }
+            }
+        }
+    }
+    if let Ok(counts) = ctx.db.count_tasks_by_status().await {
+        ctx.metrics.queue_sizes(&counts);
     }
 
     // Auto-merge when task is marked done and server has a repo configured

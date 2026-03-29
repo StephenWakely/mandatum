@@ -85,6 +85,11 @@ impl Metrics {
         self.count("task.claimed", 1, &[&format!("role:{}", role)]);
     }
 
+    /// Increment when an agent polls but the queue is empty for its role.
+    pub fn task_poll_empty(&self, role: &str) {
+        self.count("task.poll_empty", 1, &[&format!("role:{}", role)]);
+    }
+
     /// Increment when a reviewer requests changes.
     pub fn review_changes_requested(&self) {
         self.count("review.changes_requested", 1, &[]);
@@ -98,6 +103,26 @@ impl Metrics {
     /// Increment when a task is blocked after too many review cycles.
     pub fn task_blocked(&self) {
         self.count("task.blocked", 1, &[]);
+    }
+
+    /// Distribution of time (seconds) from when an agent claimed a task to when it was completed.
+    pub fn task_claim_duration_seconds(&self, role: &str, seconds: f64) {
+        self.distribution("task.claim_duration_seconds", seconds, &[&format!("role:{}", role)]);
+    }
+
+    /// Gauge the current size of each queue (one call per status).
+    pub fn queue_sizes(&self, counts: &std::collections::HashMap<String, i64>) {
+        let Some(ref c) = self.client else { return };
+        for (status, count) in counts {
+            let tag_str = format!("queue:{}", status);
+            let mut builder = c.gauge("queue.size").value(*count as f64);
+            if let Ok(tag) = dogstatsd_rs::Tag::sanitise(&tag_str) {
+                builder = builder.tag(tag);
+            }
+            if let Err(e) = builder.send() {
+                warn!(metric = "queue.size", error = %e, "metric send failed");
+            }
+        }
     }
 
     // ── Internals ─────────────────────────────────────────────────────────────

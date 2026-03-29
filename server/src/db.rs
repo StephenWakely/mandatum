@@ -16,6 +16,7 @@ pub struct Task {
     pub priority: String,
     pub created_at: String,
     pub updated_at: String,
+    pub claimed_at: Option<String>,
     pub output_path: Option<String>,
     pub tags: Vec<String>,
     // git fields
@@ -125,12 +126,13 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
         pr_url:        row.get(15).unwrap_or(None),
         worktree_path: row.get(16).unwrap_or(None),
         dependencies,
+        claimed_at:    row.get(18).unwrap_or(None),
     })
 }
 
 const TASK_SELECT: &str = "SELECT id, title, description, status, assigned_role, assigned_agent_id, \
     priority, created_at, updated_at, output_path, tags, \
-    branch_name, base_branch, latest_commit, commit_count, pr_url, worktree_path, dependencies FROM tasks";
+    branch_name, base_branch, latest_commit, commit_count, pr_url, worktree_path, dependencies, claimed_at FROM tasks";
 
 #[derive(Clone)]
 pub struct Database {
@@ -200,6 +202,7 @@ impl Database {
             let _ = conn.execute("ALTER TABLE tasks ADD COLUMN worktree_path TEXT", []);
             let _ = conn.execute("ALTER TABLE tasks ADD COLUMN dependencies TEXT DEFAULT '[]'", []);
             let _ = conn.execute("ALTER TABLE agents ADD COLUMN stop_requested INTEGER NOT NULL DEFAULT 0", []);
+            let _ = conn.execute("ALTER TABLE tasks ADD COLUMN claimed_at TEXT", []);
             Ok(())
         }).await
     }
@@ -364,6 +367,7 @@ impl Database {
             pr_url: None,
             worktree_path: None,
             dependencies: dependencies.to_vec(),
+            claimed_at: None,
         };
 
         let t = task.clone();
@@ -503,6 +507,7 @@ impl Database {
                 pr_url: new_pr_url,
                 worktree_path: new_worktree_path,
                 dependencies: new_dependencies,
+                claimed_at: existing.claimed_at,
             }))
         }).await
     }
@@ -744,7 +749,7 @@ impl Database {
                     // in their role-specific column status (in_review, testing, etc.)
                     let claimed_status = if role == "coder" { "in_progress" } else { target_status.as_str() };
                     conn.execute(
-                        "UPDATE tasks SET assigned_agent_id = ?1, assigned_role = ?2, status = ?3, updated_at = ?4 WHERE id = ?5",
+                        "UPDATE tasks SET assigned_agent_id = ?1, assigned_role = ?2, status = ?3, updated_at = ?4, claimed_at = ?4 WHERE id = ?5",
                         params![agent_id, role, claimed_status, now, tid],
                     )?;
                     conn.execute(
@@ -832,6 +837,18 @@ impl Database {
                 by_role.insert(r, c);
             }
             Ok(Stats { total, by_status, by_role })
+        }).await
+    }
+
+    pub async fn count_tasks_by_status(&self) -> Result<std::collections::HashMap<String, i64>, tokio_rusqlite::Error> {
+        self.conn.call(|conn| {
+            let mut map = std::collections::HashMap::new();
+            let mut stmt = conn.prepare("SELECT status, COUNT(*) FROM tasks GROUP BY status")?;
+            for row in stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))? {
+                let (s, c) = row?;
+                map.insert(s, c);
+            }
+            Ok(map)
         }).await
     }
 }
