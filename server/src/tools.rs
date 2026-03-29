@@ -219,9 +219,15 @@ async fn create_task(args: Value, ctx: &ToolContext) -> Result<Value, String> {
     let tags: Vec<String> = args["tags"].as_array()
         .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
         .unwrap_or_default();
-    let dependencies: Vec<String> = args["dependencies"].as_array()
+    let raw_dependencies: Vec<String> = args["dependencies"].as_array()
         .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
         .unwrap_or_default();
+    let mut dependencies = Vec::with_capacity(raw_dependencies.len());
+    for dep in &raw_dependencies {
+        let resolved = ctx.db.resolve_task_id(dep).await
+            .map_err(|e| format!("Invalid dependency '{}': {}", dep, e))?;
+        dependencies.push(resolved);
+    }
 
     let task = ctx.db.create_task(Some(agent_id), title, description, priority, assigned_role, branch_name, &tags, &dependencies)
         .await.map_err(|e| e.to_string())?;

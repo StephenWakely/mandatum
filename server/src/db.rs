@@ -247,6 +247,34 @@ impl Database {
         }).await
     }
 
+    /// Resolve a task ID that may be a short prefix (e.g. "9f8760ab") to the full UUID.
+    /// Returns the full ID if exactly one task matches, or an error if zero or multiple match.
+    pub async fn resolve_task_id(&self, id: &str) -> Result<String, String> {
+        // Fast path: already a full UUID (36 chars with dashes)
+        if id.len() == 36 {
+            let exists = self.get_task(id).await
+                .map_err(|e| e.to_string())?
+                .is_some();
+            if exists {
+                return Ok(id.to_string());
+            }
+            return Err(format!("No task found with ID '{}'", id));
+        }
+        let prefix = id.to_string();
+        let matches: Vec<String> = self.conn.call(move |conn| {
+            let mut stmt = conn.prepare("SELECT id FROM tasks WHERE id LIKE ?1")?;
+            let pattern = format!("{}%", prefix);
+            let rows = stmt.query_map(params![pattern], |row| row.get(0))?;
+            Ok(rows.filter_map(|r| r.ok()).collect())
+        }).await.map_err(|e| e.to_string())?;
+
+        match matches.len() {
+            1 => Ok(matches.into_iter().next().unwrap()),
+            0 => Err(format!("No task found with ID prefix '{}'", id)),
+            _ => Err(format!("Ambiguous ID prefix '{}' matches {} tasks", id, matches.len())),
+        }
+    }
+
     pub async fn get_task_with_activity(&self, id: &str) -> Result<Option<TaskWithActivity>, tokio_rusqlite::Error> {
         let id_owned = id.to_string();
         let task = self.get_task(&id_owned).await?;

@@ -1,4 +1,4 @@
-use dogstatsd_rs::{Client, ClientBuilder, Tag};
+use dogstatsd::{Client, ClientBuilder, Tag};
 use tracing::warn;
 
 /// Thin wrapper around the DogStatsD client.
@@ -116,7 +116,7 @@ impl Metrics {
         for (status, count) in counts {
             let tag_str = format!("queue:{}", status);
             let mut builder = c.gauge("queue.size").value(*count as f64);
-            if let Ok(tag) = dogstatsd_rs::Tag::sanitise(&tag_str) {
+            if let Ok(tag) = dogstatsd::Tag::sanitise(&tag_str) {
                 builder = builder.tag(tag);
             }
             if let Err(e) = builder.send() {
