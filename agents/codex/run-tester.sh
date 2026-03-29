@@ -26,6 +26,8 @@ echo "[tester] Log file       : $LOG_FILE"
 echo "[tester] Press Ctrl-C to stop."
 echo ""
 
+register_agent_role "tester"
+
 while true; do
   if stop_requested_rest; then
     echo "[tester/$AGENT_ID] Stop requested. Exiting."
@@ -35,7 +37,7 @@ while true; do
   echo "[tester/$AGENT_ID] Starting test cycle at $(date '+%H:%M:%S')"
 
   task_json="$(claim_next_task "tester" 2>>"$LOG_FILE" || true)"
-  task_id="$(jq -er '.task.id' <<<"$task_json" 2>/dev/null || true)"
+  task_id="$(jq -r '.task.id // empty' <<<"$task_json" 2>/dev/null || true)"
   if [ -z "$task_id" ]; then
     echo "[tester/$AGENT_ID] No task available." | tee -a "$LOG_FILE"
     heartbeat_agent
