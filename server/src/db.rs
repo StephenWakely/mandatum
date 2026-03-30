@@ -805,8 +805,15 @@ impl Database {
     ) -> Result<Option<Task>, tokio_rusqlite::Error> {
         let agent_id = agent_id.to_string();
         self.conn.call(move |conn| {
+            // Match any non-terminal status so non-coder agents (whose tasks stay in
+            // in_review / testing / docs_needed when claimed) are also detected.
             Ok(conn.query_row(
-                &format!("{} WHERE assigned_agent_id = ?1 AND status = 'in_progress' ORDER BY updated_at DESC LIMIT 1", TASK_SELECT),
+                &format!(
+                    "{} WHERE assigned_agent_id = ?1 \
+                     AND status NOT IN ('done','blocked') \
+                     ORDER BY updated_at DESC LIMIT 1",
+                    TASK_SELECT
+                ),
                 params![agent_id],
                 row_to_task,
             ).optional()?)
@@ -884,7 +891,8 @@ impl Database {
             let now = Utc::now().to_rfc3339();
 
             let mut stmt = conn.prepare(
-                "SELECT id, assigned_role FROM tasks WHERE status = 'in_progress' \
+                "SELECT id, assigned_role FROM tasks \
+                 WHERE status IN ('in_progress','in_review','testing','docs_needed') \
                  AND assigned_agent_id IS NOT NULL AND assigned_agent_id != '' \
                  AND assigned_agent_id IN \
                  (SELECT agent_id FROM agents WHERE last_seen < datetime('now', ?1))"

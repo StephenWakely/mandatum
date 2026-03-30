@@ -46,10 +46,13 @@ while true; do
 
   branch_name="$(jq -r '.task.branch_name // empty' <<<"$task_json")"
   if [ -z "$branch_name" ]; then
-    echo "[docs/$AGENT_ID] Claimed task $task_id but no branch was recorded." | tee -a "$LOG_FILE"
-    heartbeat_agent
-    sleep 10
-    continue
+    # Derive a branch name from the task title and record it on the task
+    title_slug="$(jq -r '.task.title // "task"' <<<"$task_json" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/-\+/-/g' | sed 's/^-\|-$//g' | cut -c1-50)"
+    branch_name="docs/${title_slug}"
+    echo "[docs/$AGENT_ID] No branch for task $task_id — using derived branch: $branch_name" | tee -a "$LOG_FILE"
+    curl -sf "$MANDATUM_REST_URL/api/tasks/$task_id" -X PATCH \
+      -H 'Content-Type: application/json' \
+      -d "$(jq -cn --arg b "$branch_name" '{branch_name:$b}')" >/dev/null || true
   fi
 
   worktree_rel=".worktrees/$(safe_worktree_name "$branch_name" "-docs")"
