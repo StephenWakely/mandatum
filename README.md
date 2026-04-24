@@ -87,6 +87,21 @@ Open **http://localhost:3001**.
 
 Use the **+ New Task** button in the UI, or `POST /api/tasks` directly. As soon as a task enters the queue, the spawner detects it and launches the appropriate agent.
 
+For larger features, use the **planner agent** to break work down into tasks with correct roles, priorities, and dependencies:
+
+```bash
+# Interactive session — describe what you want to build
+agents/claude/run-planner.sh
+
+# Pre-load a plan document and discuss it interactively
+agents/claude/run-planner.sh plan.md
+
+# Non-interactive — read a plan file and create all tasks immediately
+agents/claude/run-planner.sh --auto plan.md
+```
+
+When chatting with the planner, you can ask it to optimise the dependency graph for parallelism ("make as much run in parallel as possible") or sequence ("keep it linear, one task at a time"). Dependencies control which tasks the spawner can start — a task with unresolved dependencies won't be claimed until all its dependencies reach `done`.
+
 ### Server flags
 
 | Flag | Default | Description |
