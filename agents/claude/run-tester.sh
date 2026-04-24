@@ -39,6 +39,7 @@ while true; do
   task_id="$(jq -r '.task.id // empty' <<<"$task_json" 2>/dev/null || true)"
   if [ -z "$task_id" ]; then
     echo "[tester/$AGENT_ID] No task available." | tee -a "$LOG_FILE"
+    if [ "${MANDATUM_ONCE:-0}" = "1" ]; then exit 0; fi
     heartbeat_agent
     sleep 30
     continue
@@ -65,6 +66,15 @@ while true; do
 
   title="$(jq -r '.task.title // "(untitled task)"' <<<"$task_json")"
   description="$(jq -r '.task.description // ""' <<<"$task_json")"
+
+  EXTRA_BLOCK=""
+  if [ -n "${ADDITIONAL_INSTRUCTIONS:-}" ]; then
+    EXTRA_BLOCK="
+Additional instructions:
+${ADDITIONAL_INSTRUCTIONS}
+"
+  fi
+
   PROMPT="$(cat <<EOF
 You are a QA testing agent. Your agent_id is "$AGENT_ID".
 The shell already registered you, claimed the task, and prepared your worktree.
@@ -76,7 +86,7 @@ Branch: $branch_name
 Title: $title
 Description:
 $description
-
+$EXTRA_BLOCK
 Use the configured MCP server via the existing Claude MCP config.
 Do not call register_agent, get_next_task, create_branch, or setup_worktree for this task unless you are explicitly repairing broken local state.
 Run tests and make any necessary test-related commits in "$worktree_dir".
@@ -95,6 +105,10 @@ EOF
       --print "$PROMPT"
   ) 2>&1 | tee -a "$LOG_FILE" || true
   echo ""
+  if [ "${MANDATUM_ONCE:-0}" = "1" ]; then
+    echo "[tester/$AGENT_ID] One-shot mode: exiting."
+    exit 0
+  fi
   echo "[tester/$AGENT_ID] Cycle complete. Restarting in 10s..."
   sleep 10
 done

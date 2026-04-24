@@ -1,0 +1,35 @@
+# Mandatum agent configuration
+# Mandatum will spawn agents automatically when tasks are available.
+# Start the server with: mandatum-server --config mandatum.yaml
+
+# project_dir: path to the git repo agents work in.
+# Overridden by --repo on the CLI if provided.
+project_dir: .
+
+# agents_dir: path to the agents/ directory containing run-*.sh scripts.
+agents_dir: agents
+
+# max_concurrent: global default for how many agents can run per role simultaneously.
+# Override per role with a max_concurrent field under that role.
+max_concurrent: 5
+
+# caveman: instruct agents to respond tersely (drops filler, articles, pleasantries).
+# Reduces token usage. Override per role with a caveman field under that role.
+caveman: true
+
+agents:
+  coder:
+    type: claude        # "claude" or "codex"
+    additional_instructions: ""
+
+  reviewer:
+    type: claude
+    additional_instructions: ""
+
+  tester:
+    type: claude
+    additional_instructions: ""
+
+  docs_writer:
+    type: claude
+    additional_instructions: ""

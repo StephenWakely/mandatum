@@ -132,12 +132,12 @@ ensure_worktree() {
     fi
 
     if git -C "$PROJECT_DIR" show-ref --verify --quiet "refs/heads/$branch_name"; then
-      git -C "$PROJECT_DIR" worktree add "$abs_worktree" "$branch_name"
+      git -C "$PROJECT_DIR" worktree add "$abs_worktree" "$branch_name" 1>&2
     else
-      git -C "$PROJECT_DIR" worktree add "$abs_worktree" -b "$branch_name"
+      git -C "$PROJECT_DIR" worktree add "$abs_worktree" -b "$branch_name" 1>&2
     fi
   else
-    git -C "$PROJECT_DIR" worktree add --detach "$abs_worktree" "$branch_name"
+    git -C "$PROJECT_DIR" worktree add --detach "$abs_worktree" "$branch_name" 1>&2
   fi
 
   printf '%s\n' "$abs_worktree"

@@ -1,26 +1,34 @@
 import { useState, useEffect } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import Board from './components/Board'
 import ActivityFeed from './components/ActivityFeed'
 import AgentsPanel from './components/AgentsPanel'
 import StatsBar from './components/StatsBar'
 import CreateTaskModal from './components/CreateTaskModal'
-import { Task } from './types'
-import { PlusCircle, Activity, Users, LayoutDashboard } from 'lucide-react'
+import AgentLogModal from './components/AgentLogModal'
+import { fetchInfo } from './api'
+import { Task, AgentLogLine } from './types'
+import { PlusCircle, Activity, Users, LayoutDashboard, FolderGit2 } from 'lucide-react'
 
 type SidePanel = 'activity' | 'agents' | null
 
+const MAX_LOG_LINES = 1000
+
 export default function App() {
   const queryClient = useQueryClient()
+  const { data: info } = useQuery({ queryKey: ['info'], queryFn: fetchInfo, staleTime: Infinity })
   const [sidePanel, setSidePanel] = useState<SidePanel>(null)
   const [showCreateModal, setShowCreateModal] = useState(false)
   const [selectedTask, setSelectedTask] = useState<Task | null>(null)
+  const [agentLogs, setAgentLogs] = useState<Record<string, AgentLogLine[]>>({})
+  const [logAgentId, setLogAgentId] = useState<string | null>(null)
 
   useEffect(() => {
     const es = new EventSource('/events')
     es.onmessage = (e) => {
       try {
-        const { event } = JSON.parse(e.data)
+        const { event, data } = JSON.parse(e.data)
         if (event === 'task_created' || event === 'task_updated') {
           queryClient.invalidateQueries({ queryKey: ['tasks'] })
           queryClient.invalidateQueries({ queryKey: ['stats'] })
@@ -29,8 +37,20 @@ export default function App() {
         if (event === 'activity_added' || event === 'task_created' || event === 'task_updated') {
           queryClient.invalidateQueries({ queryKey: ['activity'] })
         }
-        if (event === 'agent_registered') {
+        if (event === 'agent_registered' || event === 'agent_updated') {
           queryClient.invalidateQueries({ queryKey: ['agents'] })
+        }
+        if (event === 'agent_log' && data?.agent_id) {
+          setAgentLogs(prev => {
+            const existing = prev[data.agent_id] ?? []
+            const next = [...existing, data as AgentLogLine]
+            return {
+              ...prev,
+              [data.agent_id]: next.length > MAX_LOG_LINES
+                ? next.slice(next.length - MAX_LOG_LINES)
+                : next,
+            }
+          })
         }
       } catch { /* ignore parse errors */ }
     }
@@ -44,7 +64,14 @@ export default function App() {
         <div className="flex items-center gap-3">
           <LayoutDashboard className="w-5 h-5 text-indigo-400" />
           <span className="font-semibold text-white tracking-tight">Mandatum</span>
-          <span className="text-slate-500 text-sm">Task Tracker</span>
+          {info?.repo_path ? (
+            <span className="flex items-center gap-1.5 text-xs text-slate-400 bg-slate-800 px-2 py-0.5 rounded font-mono">
+              <FolderGit2 className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+              {info.repo_path}
+            </span>
+          ) : (
+            <span className="text-slate-500 text-sm">Task Tracker</span>
+          )}
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -77,12 +104,24 @@ export default function App() {
         {sidePanel && (
           <aside className="w-80 shrink-0 border-l border-slate-800 bg-slate-900 overflow-hidden flex flex-col">
             {sidePanel === 'activity' && <ActivityFeed />}
-            {sidePanel === 'agents' && <AgentsPanel onTaskSelect={setSelectedTask} />}
+            {sidePanel === 'agents' && (
+              <AgentsPanel
+                onTaskSelect={setSelectedTask}
+                onViewLog={(id) => { setLogAgentId(id); setSidePanel('agents') }}
+              />
+            )}
           </aside>
         )}
       </div>
 
       {showCreateModal && <CreateTaskModal onClose={() => setShowCreateModal(false)} />}
+      {logAgentId && (
+        <AgentLogModal
+          agentId={logAgentId}
+          liveLogs={agentLogs[logAgentId] ?? []}
+          onClose={() => setLogAgentId(null)}
+        />
+      )}
     </div>
   )
 }

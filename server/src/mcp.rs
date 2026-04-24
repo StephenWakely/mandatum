@@ -316,6 +316,7 @@ mod tests {
             repo_path: None,
             base_branch: "main".to_string(),
             metrics: Arc::new(crate::metrics::Metrics::new()),
+            log_dir: None,
         });
         create_router(state)
     }

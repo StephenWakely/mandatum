@@ -58,6 +58,12 @@ export interface Stats {
   by_role: Record<string, number>
 }
 
+export interface AgentLogLine {
+  agent_id: string
+  line: string
+  ts: string
+}
+
 // Activity actions that are git-related
 export const GIT_ACTIONS = new Set([
   'branch_created', 'committed', 'review_requested',

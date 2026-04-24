@@ -107,3 +107,15 @@ export async function unstopAgent(id: string): Promise<Agent> {
   if (!res.ok) throw new Error('Failed to resume agent')
   return res.json()
 }
+
+export async function fetchInfo(): Promise<{ repo_path: string | null; base_branch: string }> {
+  const res = await fetch(`${BASE}/info`)
+  if (!res.ok) return { repo_path: null, base_branch: 'master' }
+  return res.json()
+}
+
+export async function fetchAgentLog(id: string): Promise<string[]> {
+  const res = await fetch(`${BASE}/agents/${id}/log`)
+  if (!res.ok) return []
+  return res.json()
+}

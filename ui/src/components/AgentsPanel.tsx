@@ -3,10 +3,11 @@ import { fetchAgents, fetchTasks, stopAgent, unstopAgent } from '../api'
 import { Agent, Task, AgentRole } from '../types'
 import AgentBadge from './AgentBadge'
 import { formatDistanceToNow } from 'date-fns'
-import { Users, StopCircle, PlayCircle } from 'lucide-react'
+import { Users, StopCircle, PlayCircle, Terminal } from 'lucide-react'
 
 interface AgentsPanelProps {
   onTaskSelect: (task: Task) => void
+  onViewLog?: (agentId: string) => void
 }
 
 function isActive(agent: Agent): boolean {
@@ -14,7 +15,7 @@ function isActive(agent: Agent): boolean {
   return Date.now() - new Date(agent.last_seen).getTime() < 5 * 60 * 1000
 }
 
-export default function AgentsPanel({ onTaskSelect }: AgentsPanelProps) {
+export default function AgentsPanel({ onTaskSelect, onViewLog }: AgentsPanelProps) {
   const queryClient = useQueryClient()
 
   const { data: agents = [] } = useQuery({
@@ -65,6 +66,15 @@ export default function AgentsPanel({ onTaskSelect }: AgentsPanelProps) {
                   <span className={`text-xs font-medium ${active ? 'text-emerald-400' : 'text-slate-600'}`}>
                     {active ? '● active' : '○ inactive'}
                   </span>
+                  {onViewLog && (
+                    <button
+                      onClick={() => onViewLog(agent.agent_id)}
+                      title="View agent log"
+                      className="p-0.5 rounded text-slate-600 hover:text-emerald-400 hover:bg-slate-700 transition-colors"
+                    >
+                      <Terminal className="w-3.5 h-3.5" />
+                    </button>
+                  )}
                   {agent.stop_requested ? (
                     <button
                       onClick={() => unstopMutation.mutate(agent.agent_id)}

@@ -964,4 +964,32 @@ impl Database {
             Ok(map)
         }).await
     }
+
+    pub async fn count_available_tasks_for_role(&self, role: &str) -> Result<usize, tokio_rusqlite::Error> {
+        let target_status = match role {
+            "coder"       => "backlog",
+            "reviewer"    => "in_review",
+            "tester"      => "testing",
+            "docs_writer" => "docs_needed",
+            _ => return Ok(0),
+        }.to_string();
+        self.conn.call(move |conn| {
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM tasks t \
+                 WHERE t.status = ?1 \
+                 AND (t.assigned_agent_id IS NULL OR t.assigned_agent_id = '') \
+                 AND NOT EXISTS ( \
+                     SELECT 1 FROM json_each(t.dependencies) j \
+                     WHERE j.value NOT IN (SELECT id FROM tasks WHERE status = 'done') \
+                 )",
+                params![target_status],
+                |row| row.get(0),
+            )?;
+            Ok(count.max(0) as usize)
+        }).await
+    }
+
+    pub async fn has_available_task_for_role(&self, role: &str) -> Result<bool, tokio_rusqlite::Error> {
+        self.count_available_tasks_for_role(role).await.map(|n| n > 0)
+    }
 }

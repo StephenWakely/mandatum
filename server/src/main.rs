@@ -1,7 +1,9 @@
+mod config;
 mod db;
 mod git;
 mod mcp;
 mod metrics;
+mod spawner;
 mod sse;
 mod tools;
 
@@ -29,6 +31,7 @@ pub struct AppState {
     pub repo_path: Option<String>,
     pub base_branch: String,
     pub metrics: Arc<Metrics>,
+    pub log_dir: Option<std::path::PathBuf>,
 }
 
 struct Config {
@@ -38,6 +41,7 @@ struct Config {
     ui_path:     Option<String>,
     repo_path:   Option<String>,
     base_branch: String,
+    config_path: Option<String>,
 }
 
 impl Config {
@@ -50,6 +54,7 @@ impl Config {
             ui_path:     None,
             repo_path:   None,
             base_branch: "master".to_string(),
+            config_path: None,
         };
         let mut i = 1;
         while i < args.len() {
@@ -90,6 +95,12 @@ impl Config {
                         eprintln!("Error: --base-branch requires a branch name"); std::process::exit(1)
                     });
                 }
+                "--config" | "-c" => {
+                    i += 1;
+                    cfg.config_path = Some(args.get(i).cloned().unwrap_or_else(|| {
+                        eprintln!("Error: --config requires a path"); std::process::exit(1)
+                    }));
+                }
                 "--help" | "-h" => {
                     println!("Usage: mandatum-server [OPTIONS]");
                     println!();
@@ -100,6 +111,7 @@ impl Config {
                     println!("  -u, --ui <path>           Serve React app from path   [default: ui/dist if it exists]");
                     println!("      --repo <path>          Git repo to auto-merge into on task done");
                     println!("  -b, --base-branch <name>  Default branch to merge into [default: master]");
+                    println!("  -c, --config <path>       YAML config for agent spawning [default: mandatum.yaml]");
                     println!("  -h, --help                Print this help");
                     std::process::exit(0);
                 }
@@ -114,6 +126,10 @@ impl Config {
         // Default ui_path: serve ui/dist if it exists and --ui was not given
         if cfg.ui_path.is_none() && std::path::Path::new("ui/dist").is_dir() {
             cfg.ui_path = Some("ui/dist".to_string());
+        }
+        // Default config_path: mandatum.yaml if it exists and --config was not given
+        if cfg.config_path.is_none() && std::path::Path::new("mandatum.yaml").is_file() {
+            cfg.config_path = Some("mandatum.yaml".to_string());
         }
         cfg
     }
@@ -130,10 +146,33 @@ async fn main() {
 
     let cfg = Config::from_args();
 
+    // Load YAML config if available
+    let mandatum_cfg = cfg.config_path.as_deref().map(|path| {
+        match config::MandatumConfig::from_file(path) {
+            Ok(c) => { tracing::info!("Config       → {}", path); c }
+            Err(e) => { eprintln!("Error loading config {}: {}", path, e); std::process::exit(1) }
+        }
+    });
+
+    // Create log directory for spawned agents
+    let log_dir = std::path::Path::new("logs").join("agents");
+    if mandatum_cfg.is_some() {
+        std::fs::create_dir_all(&log_dir)
+            .unwrap_or_else(|e| tracing::warn!("Could not create log dir: {}", e));
+    }
+
     let db = Database::new(&cfg.db_path).await.expect("Failed to open database");
     let broadcaster = SseBroadcaster::new();
     let metrics = Arc::new(Metrics::new());
-    let state = Arc::new(AppState { db, broadcaster, repo_path: cfg.repo_path.clone(), base_branch: cfg.base_branch.clone(), metrics });
+    let log_dir_opt = mandatum_cfg.as_ref().map(|_| log_dir.clone());
+    let state = Arc::new(AppState {
+        db,
+        broadcaster,
+        repo_path: cfg.repo_path.clone(),
+        base_branch: cfg.base_branch.clone(),
+        metrics,
+        log_dir: log_dir_opt,
+    });
 
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -141,6 +180,7 @@ async fn main() {
         .allow_headers(Any);
 
     let mut rest = Router::new()
+        .route("/api/info", get(info_handler))
         .route("/api/tasks", get(list_tasks_handler).post(create_task_handler))
         .route("/api/tasks/reap", axum::routing::post(reap_tasks_handler))
         .route("/api/tasks/:id", get(get_task_handler).patch(update_task_handler).delete(delete_task_handler))
@@ -148,6 +188,7 @@ async fn main() {
         .route("/api/tasks/:id/reset", axum::routing::post(reset_task_handler))
         .route("/api/activity", get(list_activity_handler))
         .route("/api/agents", get(list_agents_handler))
+        .route("/api/agents/:id/log", get(agent_log_handler))
         .route("/api/agents/:id/stop", axum::routing::post(stop_agent_handler).delete(unstop_agent_handler))
         .route("/api/stats", get(stats_handler))
         .route("/events", get(sse::sse_handler));
@@ -159,6 +200,17 @@ async fn main() {
     }
 
     let rest = rest.layer(cors.clone()).with_state(state.clone());
+
+    // Start agent spawner if config is loaded
+    if let Some(cfg_data) = mandatum_cfg {
+        let sp = Arc::new(spawner::Spawner::new(
+            Arc::new(cfg_data),
+            state.clone(),
+            log_dir,
+        ));
+        tokio::spawn(async move { sp.run().await });
+        tracing::info!("Spawner      → active (polling every 5s)");
+    }
 
     // Background watchdog: reap stale tasks every 60 seconds
     let reap_state = state.clone();
@@ -478,5 +530,33 @@ async fn reset_task_handler(
         }
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+async fn info_handler(State(s): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "repo_path": s.repo_path,
+        "base_branch": s.base_branch,
+    }))
+}
+
+async fn agent_log_handler(
+    State(s): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let Some(ref log_dir) = s.log_dir else {
+        return Json(Vec::<String>::new()).into_response();
+    };
+    // Sanitise: only allow alphanumerics, hyphens, underscores in agent_id
+    if !id.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+        return (StatusCode::BAD_REQUEST, "invalid agent id").into_response();
+    }
+    let path = log_dir.join(format!("{}.log", id));
+    match tokio::fs::read_to_string(&path).await {
+        Ok(content) => {
+            let lines: Vec<&str> = content.lines().collect();
+            Json(lines).into_response()
+        }
+        Err(_) => Json(Vec::<String>::new()).into_response(),
     }
 }
