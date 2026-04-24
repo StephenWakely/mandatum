@@ -47,7 +47,7 @@ echo '.worktrees/' >> /path/to/your/project/.gitignore
 
 ### 1. Configure
 
-Copy or edit `mandatum.yaml` at the repo root:
+Edit `mandatum.yaml` at the repo root:
 
 ```yaml
 project_dir: /path/to/your/project   # git repo agents work in
@@ -68,46 +68,36 @@ agents:
     type: claude
 ```
 
-### 2. Start the server
+### 2. Build and run
 
 ```bash
-# Development (server on :3001, UI dev server on :5173)
-make dev
-
-# Or manually in two terminals:
-cd server && cargo run -- --config ../mandatum.yaml
-cd ui && npm run dev
+make build
+./server/target/release/mandatum-server \
+  --ui ui/dist \
+  --db tasks.db \
+  --repo /path/to/your/project \
+  --base-branch main
 ```
 
-Open **http://localhost:5173**.
+Open **http://localhost:3001**.
+
+> **First build:** `make build` compiles Rust dependencies (1–2 min). Subsequent builds are fast.
 
 ### 3. Create tasks
 
 Use the **+ New Task** button in the UI, or `POST /api/tasks` directly. As soon as a task enters the queue, the spawner detects it and launches the appropriate agent.
 
----
+### Server flags
 
-## Running in Development
-
-### Option A — one command (recommended)
-
-```bash
-make dev
-```
-
-Starts both the Rust server and the React dev server concurrently. Press **Ctrl-C** to stop both.
-
-### Option B — two terminals
-
-```bash
-# Terminal 1: Rust server (REST on :3001, MCP on :3002)
-cd server && cargo run -- --config ../mandatum.yaml
-
-# Terminal 2: React UI dev server on :5173
-cd ui && npm run dev
-```
-
-> **First run:** `cargo run` compiles all dependencies (1–2 min). Subsequent runs are instant.
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--ui <path>` | `ui/dist` if present | Directory of built React app to serve |
+| `--db <path>` | `tasks.db` | SQLite database path |
+| `--repo <path>` | — | Git repo agents work in; enables auto-merge on task completion |
+| `--base-branch <name>` | `master` | Branch to merge completed tasks into |
+| `--config <path>` | `mandatum.yaml` if present | YAML agent spawner config |
+| `--rest-port <port>` | `3001` | REST API and UI port |
+| `--mcp-port <port>` | `3002` | MCP/SSE port |
 
 ---
 
@@ -215,19 +205,6 @@ make serve
 The server auto-detects `ui/dist/` and `mandatum.yaml` in the current directory, so no extra flags are needed when run from the repo root.
 
 Open **http://localhost:3001** — both the API and the UI are served from the same port.
-
-### Server flags
-
-```
--d, --db <path>           SQLite database path        [default: tasks.db]
--r, --rest-port <port>    REST API port               [default: 3001]
--m, --mcp-port <port>     MCP/SSE port                [default: 3002]
--u, --ui <path>           Serve React app from path   [default: ui/dist if present]
-    --repo <path>         Git repo for auto-merge and agent project dir
--b, --base-branch <name>  Default merge-into branch   [default: master]
--c, --config <path>       YAML agent config           [default: mandatum.yaml if present]
--h, --help
-```
 
 ---
 
