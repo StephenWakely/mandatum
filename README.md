@@ -25,22 +25,27 @@ The server spawns agent processes automatically when tasks become available. Eac
 ## Prerequisites
 
 - **Rust** toolchain (stable) — [rustup.rs](https://rustup.rs)
-- **Node.js 18+** and npm — [nodejs.org](https://nodejs.org) or `nvm`
+- **A JS package manager** — npm/Node.js 18+ ([nodejs.org](https://nodejs.org)), [bun](https://bun.sh), pnpm, or yarn
 - **`claude` CLI** on `PATH` for Claude agents — [Claude Code](https://claude.ai/claude-code)
 - **`codex` CLI** on `PATH` for Codex agents (optional)
 
 ## Installation
 
-```bash
-cd ui && npm install && cd ..
-```
+Rust and JS dependencies are fetched automatically on first build:
 
-Rust dependencies are fetched automatically on first build.
+```bash
+export MANDATUM_TARGET_REPO=/path/to/your/project
+
+# Optional: Default is npm.
+export JAVASCRIPT_RUNTIME=bun # or pnpm or yarn
+
+make build -j2   # build Rust and UI in parallel
+```
 
 Add `.worktrees/` to the `.gitignore` of the repo agents will work in:
 
 ```bash
-echo '.worktrees/' >> /path/to/your/project/.gitignore
+echo '.worktrees/' >> $MANDATUM_TARGET_REPO/.gitignore
 ```
 
 ## Quick Start
@@ -71,12 +76,7 @@ agents:
 ### 2. Build and run
 
 ```bash
-make build
-./server/target/release/mandatum-server \
-  --ui ui/dist \
-  --db tasks.db \
-  --repo /path/to/your/project \
-  --base-branch main
+make serve
 ```
 
 Open **http://localhost:3001**.

@@ -1,9 +1,10 @@
-server/target/
-ui/node_modules/
-ui/dist/
-agents/codex/.codex-home
-agents/codex/logs/
+.env
 *.db
 *.db-shm
 *.db-wal
-.env
+agents/claude/logs/
+agents/codex/.codex-home
+agents/codex/logs/
+server/target/
+ui/dist/
+ui/node_modules/

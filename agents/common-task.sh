@@ -18,7 +18,10 @@ mcp_tool_call() {
   response="$(curl -sf \
     -H 'Content-Type: application/json' \
     -d "$payload" \
-    "$MANDATUM_MCP_URL/")"
+    "$MANDATUM_MCP_URL/")" || {
+    echo "ERROR: Cannot reach Mandatum server at $MANDATUM_MCP_URL — is it running? (make serve)" >&2
+    return 1
+  }
 
   if jq -e '.error != null' >/dev/null <<<"$response"; then
     jq -r '.error.message' <<<"$response" >&2

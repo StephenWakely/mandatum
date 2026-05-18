@@ -20,6 +20,7 @@ echo ""
 cleanup() {
   echo ""
   echo "Stopping all agents..."
+  trap - INT TERM
   kill 0
 }
 

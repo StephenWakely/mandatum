@@ -1,35 +1,39 @@
-.PHONY: build serve seed clean agents
+# JS package manager — npm, bun, pnpm, and yarn all work
+JAVASCRIPT_RUNTIME    ?= npm
+MANDATUM_TARGET_REPO  ?= $(shell pwd)
 
-# Build Rust server (release) and React UI
-build:
-	@echo "Building Rust server..."
-	cd server && cargo build --release
-	@echo "Building React UI..."
-	cd ui && npm run build
-	@echo "Build complete."
+JS_INSTALL := $(JAVASCRIPT_RUNTIME) install
+# Deno users would override this one with deno task build
+JS_BUILD   := $(JAVASCRIPT_RUNTIME) run build
+
+export PROJECT_DIR := $(MANDATUM_TARGET_REPO)
+
+.PHONY: build build-server build-ui serve seed clean agents
+
+build: build-server build-ui
+	@echo "Build complete ✅"
+
+build-server: | server/Cargo.toml
+	cargo build --release --manifest-path $|
+
+build-ui:
+	cd ui && $(JS_INSTALL) && $(JS_BUILD)
 
 # Build everything and run as a single process (server serves the UI)
 serve: build
-	@echo "Starting Mandatum (single process, UI on :3001)..."
 	./server/target/release/mandatum-server --ui ui/dist
 
 # Insert sample tasks and agents into the DB
 seed:
 	@echo "Seeding database..."
-	@chmod +x server/seed.sh
-	@cd server && bash seed.sh
+	cd server && bash seed.sh
 
 # Run all four agent types in parallel (requires `claude` CLI on PATH)
-# PROJECT_DIR defaults to cwd — set it to the repo the agents should work in:
-#   make agents PROJECT_DIR=/path/to/your/project
-#   make -C /path/to/mandatum agents PROJECT_DIR=/path/to/your/project
-PROJECT_DIR ?= $(shell pwd)
+# MANDATUM_TARGET_REPO defaults to cwd — set it to the repo the agents should work in
 agents:
-	@echo "Starting all agents in $(PROJECT_DIR)..."
-	@chmod +x agents/*.sh
-	@PROJECT_DIR="$(PROJECT_DIR)" agents/run-all.sh
+	bash agents/claude/run-all.sh
 
 # Clean build artifacts
 clean:
 	cd server && cargo clean
-	cd ui && rm -rf dist node_modules
+	cd ui && $(RM) -r dist node_modules
