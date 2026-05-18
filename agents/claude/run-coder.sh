@@ -73,7 +73,7 @@ while true; do
   # Fetch reviewer feedback from the activity log (changes_requested entries)
   review_feedback=""
   review_point_count=0
-  task_detail="$(curl -sf "${MANDATUM_URL:-http://localhost:3030}/api/tasks/$task_id" || true)"
+  task_detail="$(curl -sf "${MANDATUM_REST_URL:-http://localhost:3001}/api/tasks/$task_id" || true)"
   if [ -n "$task_detail" ]; then
     # Number each feedback round so the coder must address them individually
     review_feedback="$(jq -r '
