@@ -161,6 +161,11 @@ async fn main() {
             .unwrap_or_else(|e| tracing::warn!("Could not create log dir: {}", e));
     }
 
+    // project_dir from YAML is the fallback repo path when --repo is not given
+    let repo_path = cfg.repo_path.clone().or_else(|| {
+        mandatum_cfg.as_ref().and_then(|c| c.project_dir.clone())
+    });
+
     let db = Database::new(&cfg.db_path).await.expect("Failed to open database");
     let broadcaster = SseBroadcaster::new();
     let metrics = Arc::new(Metrics::new());
@@ -168,7 +173,7 @@ async fn main() {
     let state = Arc::new(AppState {
         db,
         broadcaster,
-        repo_path: cfg.repo_path.clone(),
+        repo_path: repo_path.clone(),
         base_branch: cfg.base_branch.clone(),
         metrics,
         log_dir: log_dir_opt,
@@ -237,7 +242,7 @@ async fn main() {
     if let Some(ref p) = cfg.ui_path {
         tracing::info!("React UI  → http://0.0.0.0:{} (serving {})", cfg.rest_port, p);
     }
-    if let Some(ref p) = cfg.repo_path {
+    if let Some(ref p) = repo_path {
         tracing::info!("Auto-merge → enabled (repo: {}, base: {})", p, cfg.base_branch);
     }
 
