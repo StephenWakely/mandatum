@@ -29,6 +29,14 @@ The server spawns agent processes automatically when tasks become available. Eac
 - **`claude` CLI** on `PATH` for Claude agents — [Claude Code](https://claude.ai/claude-code)
 - **`codex` CLI** on `PATH` for Codex agents (optional)
 
+> **⚠️ Security warning**
+>
+> All agent runner scripts launch their CLI with permission checks disabled:
+> - Claude agents use `claude --dangerously-skip-permissions` — no per-tool-call approval, the model can read/write/execute anything the user running the script can.
+> - Codex agents use `codex --dangerously-bypass-approvals-and-sandbox` — same idea plus no OS sandbox.
+>
+> This is required for autonomous operation but means an agent can execute arbitrary commands, modify files outside the worktree, exfiltrate data, or be hijacked by a prompt-injection payload in a task description or repository file. **Only run mandatum against repositories you trust, ideally inside a VM or container.** Review the prompts in `agents/claude/run-*.sh` to see exactly what each role is told to do.
+
 ## Installation
 
 Rust and JS dependencies are fetched automatically on first build:
@@ -113,6 +121,30 @@ When chatting with the planner, you can ask it to optimise the dependency graph 
 | `--config <path>` | `mandatum.yaml` if present | YAML agent spawner config |
 | `--rest-port <port>` | `3001` | REST API and UI port |
 | `--mcp-port <port>` | `3002` | MCP/SSE port |
+
+---
+
+## How agents run
+
+Every task is worked on through a two-layer execution model:
+
+1. **Bash runner script** (`agents/claude/run-<role>.sh`) — claims one task from the queue, sets up a git worktree, constructs a prompt, and invokes the LLM CLI.
+2. **`claude` (or `codex`) CLI** — receives the prompt and the MCP config, performs the work, and calls back to mandatum via MCP tools (`record_commit`, `request_review`, …).
+
+The same bash script is the unit of work for both orchestration modes below — they only differ in *who* runs it and *how many times*.
+
+| Mode | Driven by | Script behaviour | Use case |
+|------|-----------|------------------|----------|
+| **Spawner** | The Rust server (`server/src/spawner.rs`) polls the queue every 5 s and runs the script once per available task with `MANDATUM_ONCE=1` | One-shot: claim → run → exit | Normal operation when `mandatum.yaml` is configured. Enforces `max_concurrent`, streams logs to the UI. |
+| **Manual** | You run the script yourself (`agents/claude/run-coder.sh …`) | Loops continuously: claim → run → sleep 10 s | Debugging a single role, running agents on a different machine, bypassing the spawner's role config. |
+
+The two modes can coexist — manually-launched agents register through the same MCP calls and appear alongside spawner-driven ones in the UI. The full chain per task is:
+
+```
+Spawner (Rust)  →  run-<role>.sh  →  claude --print PROMPT  →  MCP calls back to mandatum
+                       │
+                       └── or you, in a terminal (manual mode)
+```
 
 ---
 

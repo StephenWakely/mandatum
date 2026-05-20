@@ -21,7 +21,9 @@ build-ui:
 
 # Build everything and run as a single process (server serves the UI)
 serve: build
-	./server/target/release/mandatum-server --ui ui/dist
+	./server/target/release/mandatum-server \
+		--ui ui/dist \
+		--config $(MANDATUM_TARGET_REPO)/mandatum.yaml
 
 # Insert sample tasks and agents into the DB
 seed:
