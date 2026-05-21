@@ -1,10 +1,12 @@
 .env
+.worktrees
 *.db
 *.db-shm
 *.db-wal
 agents/claude/logs/
 agents/codex/.codex-home
 agents/codex/logs/
+logs
 server/target/
 ui/dist/
 ui/node_modules/

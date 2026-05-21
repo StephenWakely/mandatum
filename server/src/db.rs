@@ -620,7 +620,11 @@ impl Database {
     pub async fn delete_task(&self, id: &str) -> Result<bool, tokio_rusqlite::Error> {
         let id = id.to_string();
         self.conn.call(move |conn| {
-            let n = conn.execute("DELETE FROM tasks WHERE id = ?1", params![id])?;
+            let tx = conn.transaction()?;
+            tx.execute("DELETE FROM activity_log WHERE task_id = ?1", params![id])?;
+            tx.execute("DELETE FROM commits WHERE task_id = ?1", params![id])?;
+            let n = tx.execute("DELETE FROM tasks WHERE id = ?1", params![id])?;
+            tx.commit()?;
             Ok(n > 0)
         }).await
     }
@@ -767,6 +771,21 @@ impl Database {
             Ok(())
         }).await?;
         Ok(now)
+    }
+
+    /// Force an agent's last_seen to a sentinel old timestamp so the UI's
+    /// staleness detection marks it inactive immediately. Use when we *know*
+    /// the agent process has exited (e.g. the spawner saw its child terminate).
+    /// Subsequent heartbeats from a freshly registered agent overwrite this.
+    pub async fn mark_agent_inactive(&self, agent_id: &str) -> Result<(), tokio_rusqlite::Error> {
+        let agent_id = agent_id.to_string();
+        self.conn.call(move |conn| {
+            conn.execute(
+                "UPDATE agents SET last_seen = '1970-01-01T00:00:00Z', current_task_id = NULL WHERE agent_id = ?1",
+                params![agent_id],
+            )?;
+            Ok(())
+        }).await
     }
 
     pub async fn clear_agent_current_task(&self, agent_id: &str) -> Result<(), tokio_rusqlite::Error> {

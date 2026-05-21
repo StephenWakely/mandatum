@@ -6,6 +6,9 @@
 # Overridden by --repo on the CLI if provided.
 project_dir: .
 
+# Run in a container for sandboxing
+runtime: docker
+
 # agents_dir: path to the agents/ directory containing run-*.sh scripts.
 agents_dir: agents
 

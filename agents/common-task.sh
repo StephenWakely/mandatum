@@ -84,6 +84,48 @@ stop_requested_rest() {
     > /dev/null 2>&1
 }
 
+CLAUDE_STREAM_FILTER='
+  if .type == "assistant" then
+    (.message.content // [])[]? |
+      if .type == "tool_use" then "→ \(.name)\((.input // {} | tostring) as $i | if ($i | length) > 0 then "(\($i | .[:120]))" else "" end)"
+      elif .type == "text" then "» \((.text // "") | gsub("\n"; " ") | .[:200])"
+      else empty end
+  elif .type == "user" then
+    (.message.content // [])[]? |
+      if .type == "tool_result" then "  ↳ \((.content // "" | if type == "array" then tostring else . end) | tostring | gsub("\n"; " ") | .[:120])"
+      else empty end
+  elif .type == "result" then "■ done (\(.duration_ms // 0)ms)"
+  else empty end
+'
+
+# Filter stream-json output from `claude --output-format stream-json` into
+# one human-readable line per event. Falls through unchanged if jq chokes.
+claude_stream_filter() {
+  jq -rc "$CLAUDE_STREAM_FILTER" 2>/dev/null
+}
+
+dump_agent_diagnostics() {
+  local label="${1:-agent}"
+  local worktree="${2:-}"
+  echo "─── diagnostics ($label) ───"
+  echo "host       : $(hostname 2>/dev/null || echo unknown)  user=$(whoami) pwd=$(pwd)"
+  echo "claude     : $(command -v claude || echo MISSING)  version=$(claude --version 2>/dev/null || echo n/a)"
+  echo "MCP URL    : ${MANDATUM_MCP_URL:-http://localhost:3002}"
+  echo "REST URL   : ${MANDATUM_REST_URL:-http://localhost:3001}"
+  echo "MCP config : $MCP_CONFIG (exists=$([ -f "$MCP_CONFIG" ] && echo yes || echo no))"
+  echo "auth env   : API_KEY=$([ -n "${ANTHROPIC_API_KEY:-}" ] && echo set || echo unset)" \
+       " AUTH_TOKEN=$([ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] && echo set || echo unset)" \
+       " BASE_URL=${ANTHROPIC_BASE_URL:-unset}"
+  echo "REST reach : $(curl -sf -o /dev/null -w '%{http_code}' "${MANDATUM_REST_URL:-http://localhost:3001}/api/info" 2>&1 || echo unreachable)"
+  if [ -n "$worktree" ]; then
+    echo "worktree   : $worktree (exists=$([ -d "$worktree" ] && echo yes || echo no))"
+    if [ -d "$worktree" ]; then
+      echo "             branch=$(git -C "$worktree" rev-parse --abbrev-ref HEAD 2>/dev/null || echo n/a) head=$(git -C "$worktree" rev-parse --short HEAD 2>/dev/null || echo n/a)"
+    fi
+  fi
+  echo "────────────────────────────"
+}
+
 safe_worktree_name() {
   local branch_name="$1"
   local suffix="${2:-}"

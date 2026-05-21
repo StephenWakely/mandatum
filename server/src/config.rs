@@ -2,6 +2,8 @@ use serde::Deserialize;
 use std::collections::HashMap;
 
 const DEFAULT_MAX_CONCURRENT: usize = 5;
+const DEFAULT_RUNTIME: &str = "bash";
+const DEFAULT_DOCKER_IMAGE: &str = "mandatum-agent:latest";
 
 #[derive(Deserialize, Clone, Debug)]
 pub struct AgentRoleConfig {
@@ -28,6 +30,14 @@ fn default_caveman() -> bool {
     true
 }
 
+fn default_runtime() -> String {
+    DEFAULT_RUNTIME.to_string()
+}
+
+fn default_docker_image() -> String {
+    DEFAULT_DOCKER_IMAGE.to_string()
+}
+
 #[derive(Deserialize, Clone, Debug, Default)]
 pub struct MandatumConfig {
     pub project_dir: Option<String>,
@@ -37,6 +47,16 @@ pub struct MandatumConfig {
     pub max_concurrent: usize,
     #[serde(default = "default_caveman")]
     pub caveman: bool,
+    #[serde(default = "default_runtime")]
+    pub runtime: String,
+    #[serde(default = "default_docker_image")]
+    pub docker_image: String,
+    /// Shell command whose stdout is forwarded to the agent as
+    /// `ANTHROPIC_AUTH_TOKEN`. Run once per spawn so tokens are always fresh.
+    pub auth_token_helper: Option<String>,
+    /// Multi-line headers forwarded as `ANTHROPIC_CUSTOM_HEADERS`. Use YAML
+    /// `|` block scalar for newlines (e.g. gateway routing headers).
+    pub anthropic_custom_headers: Option<String>,
     #[serde(default)]
     pub agents: HashMap<String, AgentRoleConfig>,
 }
