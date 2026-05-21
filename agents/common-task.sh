@@ -99,9 +99,38 @@ CLAUDE_STREAM_FILTER='
 '
 
 # Filter stream-json output from `claude --output-format stream-json` into
-# one human-readable line per event. Falls through unchanged if jq chokes.
+# one human-readable line per event. Lines that aren't JSON (errors, debug
+# output, etc.) are passed through verbatim.
 claude_stream_filter() {
-  jq -rc "$CLAUDE_STREAM_FILTER" 2>/dev/null
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    if [ "${line:0:1}" = "{" ]; then
+      printf '%s\n' "$line" | jq -rc "$CLAUDE_STREAM_FILTER" 2>/dev/null
+    else
+      printf '%s\n' "$line"
+    fi
+  done
+}
+
+# Print an end-of-run summary from a captured stream-json file: duration,
+# turns, cost, token usage, and a histogram of tool calls (MCP + builtin).
+agent_run_summary() {
+  local f="$1"
+  [ -f "$f" ] || return 0
+  echo
+  echo "─── run summary ───"
+  jq -r '
+    select(.type == "result") |
+    "duration   : \(((.duration_ms // 0) / 1000) | tostring | .[:6])s  turns=\(.num_turns // "?")  cost=$\(.total_cost_usd // 0)",
+    "tokens     : in=\(.usage.input_tokens // 0)  out=\(.usage.output_tokens // 0)  cache_create=\(.usage.cache_creation_input_tokens // 0)  cache_read=\(.usage.cache_read_input_tokens // 0)"
+  ' "$f" 2>/dev/null
+  local tools
+  tools="$(jq -r 'select(.type == "assistant") | .message.content[]? | select(.type == "tool_use") | .name' "$f" 2>/dev/null | sort | uniq -c | sort -rn)"
+  if [ -n "$tools" ]; then
+    echo "tool calls :"
+    echo "$tools" | sed 's/^/  /'
+  fi
+  echo "───────────────────"
 }
 
 dump_agent_diagnostics() {
