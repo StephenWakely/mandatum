@@ -84,6 +84,13 @@ stop_requested_rest() {
     > /dev/null 2>&1
 }
 
+# Extra claude CLI flags built from mandatum.yaml (forwarded by the spawner
+# as MANDATUM_MODEL / MANDATUM_EFFORT). Runners spread "${CLAUDE_EXTRA_ARGS[@]}"
+# into their claude invocation.
+CLAUDE_EXTRA_ARGS=()
+[ -n "${MANDATUM_MODEL:-}" ]  && CLAUDE_EXTRA_ARGS+=(--model  "$MANDATUM_MODEL")
+[ -n "${MANDATUM_EFFORT:-}" ] && CLAUDE_EXTRA_ARGS+=(--effort "$MANDATUM_EFFORT")
+
 CLAUDE_STREAM_FILTER='
   if .type == "assistant" then
     (.message.content // [])[]? |

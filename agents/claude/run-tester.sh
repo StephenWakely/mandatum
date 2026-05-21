@@ -105,6 +105,7 @@ EOF
     claude --dangerously-skip-permissions \
       --mcp-config "$MCP_CONFIG" \
       --output-format stream-json --verbose \
+      "${CLAUDE_EXTRA_ARGS[@]}" \
       --print "$PROMPT" 2>&1
   ) | tee "$STREAM_TMP" | claude_stream_filter | tee -a "$LOG_FILE" || true
   agent_run_summary "$STREAM_TMP" | tee -a "$LOG_FILE"
