@@ -8,7 +8,7 @@ set -euo pipefail
 AGENT_ID="${AGENT_ID:-${1:-tester-$(hostname)-$$}}"
 PROJECT_DIR="${2:-${PROJECT_DIR:-$(pwd)}}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MCP_CONFIG="$SCRIPT_DIR/mcp-config.json"
+MCP_CONFIG="${MCP_CONFIG:-$SCRIPT_DIR/mcp-config.json}"
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
 LOG_DIR="${LOG_DIR:-$SCRIPT_DIR/logs}"
 
@@ -98,6 +98,7 @@ Call heartbeat while working.
 EOF
 )"
 
+  dump_agent_diagnostics "tester/$AGENT_ID" "$worktree_dir"
   (
     cd "$worktree_dir"
     claude --dangerously-skip-permissions \

@@ -118,14 +118,36 @@ impl Spawner {
             }
         };
 
-        let mut cmd = Command::new("bash");
-        cmd.arg(&script_path)
-            .env("AGENT_ID", &agent_id)
-            .env("PROJECT_DIR", &project_dir)
-            .env("MANDATUM_ONCE", "1")
-            .env("ADDITIONAL_INSTRUCTIONS", &additional)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        let mut cmd = match self.config.runtime.as_str() {
+            "docker" => match build_docker_command(
+                &self.config,
+                &agent_id,
+                &agent_type,
+                &script_name,
+                &project_dir,
+                &additional,
+            ) {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::error!(
+                        "Cannot build docker command for {}: {}",
+                        agent_id,
+                        e
+                    );
+                    return;
+                }
+            },
+            _ => {
+                let mut c = Command::new("bash");
+                c.arg(&script_path)
+                    .env("AGENT_ID", &agent_id)
+                    .env("PROJECT_DIR", &project_dir)
+                    .env("MANDATUM_ONCE", "1")
+                    .env("ADDITIONAL_INSTRUCTIONS", &additional);
+                c
+            }
+        };
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
         let mut child = match cmd.spawn() {
             Ok(c) => c,
@@ -151,6 +173,7 @@ impl Spawner {
         );
 
         let broadcaster = self.state.broadcaster.clone();
+        let state_for_exit = Arc::clone(&self.state);
         let agent_id_clone = agent_id.clone();
         let role_counter = Arc::clone(&self.running_per_role);
         let role_str = role.to_string();
@@ -197,6 +220,19 @@ impl Spawner {
 
             let _ = child.wait().await;
 
+            // Mark inactive immediately so the UI doesn't keep showing the
+            // agent as live until the 5-minute heartbeat threshold expires.
+            if let Err(e) = state_for_exit.db.mark_agent_inactive(&agent_id_clone).await {
+                tracing::warn!("Failed to mark agent {} inactive: {}", agent_id_clone, e);
+            }
+            broadcaster.broadcast(
+                serde_json::json!({
+                    "event": "agent_updated",
+                    "data": {"agent_id": agent_id_clone}
+                })
+                .to_string(),
+            );
+
             let mut map = role_counter.lock().unwrap();
             let count = map.entry(role_str).or_insert(0);
             if *count > 0 {
@@ -205,4 +241,119 @@ impl Spawner {
             tracing::info!("Agent {} exited", agent_id_clone);
         });
     }
+}
+
+/// Build a `docker run` command that executes the role's bash script inside
+/// the configured agent image. The target project and the agents directory
+/// are mounted at the same absolute path inside the container as on the host
+/// so that any absolute paths git stores (e.g. worktree gitdirs) resolve in
+/// both contexts. The container reaches mandatum's REST and MCP ports via
+/// host.docker.internal.
+fn build_docker_command(
+    config: &MandatumConfig,
+    agent_id: &str,
+    agent_type: &str,
+    script_name: &str,
+    project_dir: &str,
+    additional: &str,
+) -> Result<Command, std::io::Error> {
+    let agents_dir_abs = std::fs::canonicalize(&config.agents_dir)?;
+    let project_dir_abs = std::fs::canonicalize(project_dir)?;
+    let project_dir_str = project_dir_abs.display().to_string();
+    let agents_dir_str = agents_dir_abs.display().to_string();
+    let container_script = format!("{}/{}/{}", agents_dir_str, agent_type, script_name);
+    let mcp_config_path = format!("{}/claude/mcp-config-docker.json", agents_dir_str);
+
+    let mut cmd = Command::new("docker");
+    cmd.args([
+        "run",
+        "--rm",
+        "--name",
+        agent_id,
+        "--add-host=host.docker.internal:host-gateway",
+        "-w",
+        &project_dir_str,
+        "-e",
+        &format!("AGENT_ID={agent_id}"),
+        "-e",
+        &format!("PROJECT_DIR={project_dir_str}"),
+        "-e",
+        "MANDATUM_ONCE=1",
+        "-e",
+        &format!("ADDITIONAL_INSTRUCTIONS={additional}"),
+        "-e",
+        "MANDATUM_REST_URL=http://host.docker.internal:3001",
+        "-e",
+        "MANDATUM_MCP_URL=http://host.docker.internal:3002",
+        "-e",
+        &format!("MCP_CONFIG={mcp_config_path}"),
+        "-e",
+        "LOG_DIR=/tmp/agent-logs",
+        // Tells claude that running as root is OK inside this container.
+        // Undocumented but stable since 2024; the image is a sealed sandbox.
+        "-e",
+        "IS_SANDBOX=1",
+        "-v",
+        &format!("{project_dir_str}:{project_dir_str}"),
+        "-v",
+        &format!("{agents_dir_str}:{agents_dir_str}:ro"),
+    ]);
+
+    // Forward Anthropic credentials. Precedence:
+    //   ANTHROPIC_AUTH_TOKEN     → from auth_token_helper (fresh per spawn)
+    //                             or, fallback, from the host env
+    //   ANTHROPIC_API_KEY        → from host env only (static sk-ant-… keys)
+    //   ANTHROPIC_CUSTOM_HEADERS → from mandatum.yaml first, else host env
+    if let Ok(val) = std::env::var("ANTHROPIC_API_KEY") {
+        cmd.args(["-e", &format!("ANTHROPIC_API_KEY={val}")]);
+    }
+    let token = match &config.auth_token_helper {
+        Some(helper) => run_auth_helper(helper)
+            .or_else(|_| std::env::var("ANTHROPIC_AUTH_TOKEN"))
+            .ok(),
+        None => std::env::var("ANTHROPIC_AUTH_TOKEN").ok(),
+    };
+    if let Some(val) = token {
+        cmd.args(["-e", &format!("ANTHROPIC_AUTH_TOKEN={val}")]);
+    }
+    let headers = config
+        .anthropic_custom_headers
+        .clone()
+        .or_else(|| std::env::var("ANTHROPIC_CUSTOM_HEADERS").ok());
+    if let Some(val) = headers {
+        cmd.args(["-e", &format!("ANTHROPIC_CUSTOM_HEADERS={val}")]);
+    }
+    // Always point the container at the host-side reverse proxy. Container
+    // networking can't reach VPN-routed gateways directly, so claude calls
+    // http://host.docker.internal:3003/... and the host's mitmdump (started
+    // via `make proxy`) re-issues the request over TLS via the host's VPN.
+    // The user's host-side ANTHROPIC_BASE_URL is deliberately ignored here.
+    cmd.args([
+        "-e",
+        "ANTHROPIC_BASE_URL=http://host.docker.internal:3003",
+    ]);
+
+    cmd.arg(&config.docker_image)
+        .arg("bash")
+        .arg(&container_script);
+
+    Ok(cmd)
+}
+
+/// Run a shell command and return its trimmed stdout. Used by the spawner
+/// to refresh the bearer token immediately before each `docker run`.
+fn run_auth_helper(command: &str) -> Result<String, std::io::Error> {
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::warn!("auth_token_helper exited {}: {}", output.status, stderr.trim());
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "auth_token_helper failed",
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }

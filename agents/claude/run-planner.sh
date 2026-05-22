@@ -8,7 +8,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MCP_CONFIG="$SCRIPT_DIR/mcp-config.json"
+MCP_CONFIG="${MCP_CONFIG:-$SCRIPT_DIR/mcp-config.json}"
 PROMPT_FILE="$SCRIPT_DIR/planner-prompt.md"
 
 if ! command -v claude &>/dev/null; then

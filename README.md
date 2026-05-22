@@ -29,6 +29,14 @@ The server spawns agent processes automatically when tasks become available. Eac
 - **`claude` CLI** on `PATH` for Claude agents — [Claude Code](https://claude.ai/claude-code)
 - **`codex` CLI** on `PATH` for Codex agents (optional)
 
+> **:warning: Security warning**
+>
+> All agent runner scripts launch their CLI with permission checks disabled:
+> - Claude agents use `claude --dangerously-skip-permissions` — no per-tool-call approval, the model can read/write/execute anything the user running the script can.
+> - Codex agents use `codex --dangerously-bypass-approvals-and-sandbox` — same idea plus no OS sandbox.
+>
+> This allows autonomous operation but means an agent can execute arbitrary commands, modify files outside the worktree, exfiltrate data, or be hijacked by a prompt-injection payload in a task description or repository file. **Only run mandatum against repositories you trust, ideally inside a VM or container.** Review the prompts in `agents/claude/run-*.sh` to see exactly what each role is told to do.
+
 ## Installation
 
 Rust and JS dependencies are fetched automatically on first build:
@@ -116,6 +124,30 @@ When chatting with the planner, you can ask it to optimise the dependency graph 
 
 ---
 
+## How agents run
+
+Every task is worked on through a two-layer execution model:
+
+1. **Bash runner script** (`agents/claude/run-<role>.sh`) — claims one task from the queue, sets up a git worktree, constructs a prompt, and invokes the LLM CLI.
+2. **`claude` (or `codex`) CLI** — receives the prompt and the MCP config, performs the work, and calls back to mandatum via MCP tools (`record_commit`, `request_review`, …).
+
+The same bash script is the unit of work for both orchestration modes below — they only differ in *who* runs it and *how many times*.
+
+| Mode | Driven by | Script behaviour | Use case |
+|------|-----------|------------------|----------|
+| **Spawner** | The Rust server (`server/src/spawner.rs`) polls the queue every 5 s and runs the script once per available task with `MANDATUM_ONCE=1` | One-shot: claim → run → exit | Normal operation when `mandatum.yaml` is configured. Enforces `max_concurrent`, streams logs to the UI. |
+| **Manual** | You run the script yourself (`agents/claude/run-coder.sh …`) | Loops continuously: claim → run → sleep 10 s | Debugging a single role, running agents on a different machine, bypassing the spawner's role config. |
+
+The two modes can coexist — manually-launched agents register through the same MCP calls and appear alongside spawner-driven ones in the UI. The full chain per task is:
+
+```
+Spawner (Rust)  →  run-<role>.sh  →  claude --print PROMPT  →  MCP calls back to mandatum
+                       │
+                       └── or you, in a terminal (manual mode)
+```
+
+---
+
 ## Agent Spawner
 
 The server's built-in spawner polls the task queue every 5 seconds. When unclaimed tasks exist for a role, it spawns the configured agent script and streams its output.
@@ -163,6 +195,67 @@ agents:
   docs_writer:
     type: claude
 ```
+
+### Sandboxed agents (Docker)
+
+The spawner can run each agent inside an ephemeral container instead of as a host subprocess. This isolates the dangerous `claude --dangerously-skip-permissions` (and codex equivalent) from your laptop's filesystem, processes, and credentials — the blast radius is the container.
+
+**Setup:**
+
+1. Build the agent image:
+   ```bash
+   make agent-image          # builds mandatum-agent:latest, ~500 MB
+   ```
+2. Flip the runtime in `mandatum.yaml`:
+   ```yaml
+   runtime: docker           # default: bash
+   docker_image: mandatum-agent:latest   # override if you tag it differently
+   ```
+3. Tell the spawner how to get claude credentials. Two ways, in `mandatum.yaml`:
+
+   ```yaml
+   # Shell command run once per container spawn — stdout becomes the
+   # container's ANTHROPIC_AUTH_TOKEN. Use it for short-lived bearer tokens.
+   auth_token_helper: "ddtool auth token rapid-ai-platform --datacenter us1.ddbuild.io"
+
+   # Static headers forwarded as ANTHROPIC_CUSTOM_HEADERS (multi-line OK).
+   # Required by some gateways for routing/identity; missing → HTTP 400.
+   anthropic_custom_headers: |
+     source: claude-code
+     org-id: 2
+     provider: anthropic
+     claude-code: true
+   ```
+
+   Alternatively, export `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or `ANTHROPIC_CUSTOM_HEADERS` in the shell that starts `mandatum-server` — the spawner forwards those env vars when the YAML fields are absent. The spawner does **not** read `~/.claude/settings.json`.
+
+**How it works:**
+- Per spawned task the server runs `docker run --rm --name <agent-id> … mandatum-agent:latest bash /<agents-dir>/<type>/run-<role>.sh`.
+- The target repo and the `agents/` directory are bind-mounted at the same absolute paths inside the container as on the host, so the worktree paths git records resolve in both contexts.
+- The container reaches mandatum REST/MCP via `host.docker.internal:3001/3002`.
+- Container stdout/stderr is streamed line-by-line like the bash runtime — the UI's live log view works unchanged.
+
+### Reverse proxy for VPN-routed Anthropic gateways
+
+Container networking can't reach a host's VPN-routed endpoints (e.g. an internal `ai-gateway.…ddbuild.io`). The spawner therefore always points containers at `http://host.docker.internal:3003`, and a small host-side reverse proxy re-issues each call over the host's network.
+
+```bash
+# Terminal 1 — proxy (requires `mitmproxy` / `mitmdump` on PATH)
+make proxy                                  # listens on :3003
+# customise via env vars:
+PROXY_PORT=4000 PROXY_UPSTREAM=https://api.anthropic.com make proxy
+
+# Terminal 2 — server, with credentials exported as above
+make serve
+```
+
+If your upstream is the public `api.anthropic.com` (no VPN), the proxy still works fine — it just adds a local hop. To skip it entirely you'd need to make the spawner stop forcing `ANTHROPIC_BASE_URL`.
+
+**What you still need on the host:**
+- Docker (or Docker Desktop) installed and running.
+- The target repo on a path that Docker can bind-mount (Docker Desktop users: ensure the path is under a shared directory).
+- `mitmdump` on PATH if you're using `make proxy`.
+- Nothing else — `claude`, `git`, `jq`, `uv` all live inside the image.
 
 ---
 
