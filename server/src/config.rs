@@ -12,6 +12,10 @@ pub struct AgentRoleConfig {
     pub additional_instructions: Option<String>,
     pub max_concurrent: Option<usize>,
     pub caveman: Option<bool>,
+    /// Claude model alias (`sonnet`, `opus`, `haiku`) or full name.
+    pub model: Option<String>,
+    /// Claude effort level (`low`, `medium`, `high`, `xhigh`, `max`).
+    pub effort: Option<String>,
 }
 
 fn default_agent_type() -> String {
@@ -57,6 +61,10 @@ pub struct MandatumConfig {
     /// Multi-line headers forwarded as `ANTHROPIC_CUSTOM_HEADERS`. Use YAML
     /// `|` block scalar for newlines (e.g. gateway routing headers).
     pub anthropic_custom_headers: Option<String>,
+    /// Default claude model — overridden by per-role `model`.
+    pub model: Option<String>,
+    /// Default claude effort level — overridden by per-role `effort`.
+    pub effort: Option<String>,
     #[serde(default)]
     pub agents: HashMap<String, AgentRoleConfig>,
 }
@@ -93,5 +101,19 @@ impl MandatumConfig {
             .get(role)
             .and_then(|a| a.caveman)
             .unwrap_or(self.caveman)
+    }
+
+    pub fn model_for_role(&self, role: &str) -> Option<String> {
+        self.agents
+            .get(role)
+            .and_then(|a| a.model.clone())
+            .or_else(|| self.model.clone())
+    }
+
+    pub fn effort_for_role(&self, role: &str) -> Option<String> {
+        self.agents
+            .get(role)
+            .and_then(|a| a.effort.clone())
+            .or_else(|| self.effort.clone())
     }
 }

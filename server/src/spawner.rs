@@ -118,6 +118,9 @@ impl Spawner {
             }
         };
 
+        let model = self.config.model_for_role(role);
+        let effort = self.config.effort_for_role(role);
+
         let mut cmd = match self.config.runtime.as_str() {
             "docker" => match build_docker_command(
                 &self.config,
@@ -126,6 +129,8 @@ impl Spawner {
                 &script_name,
                 &project_dir,
                 &additional,
+                model.as_deref(),
+                effort.as_deref(),
             ) {
                 Ok(c) => c,
                 Err(e) => {
@@ -144,6 +149,12 @@ impl Spawner {
                     .env("PROJECT_DIR", &project_dir)
                     .env("MANDATUM_ONCE", "1")
                     .env("ADDITIONAL_INSTRUCTIONS", &additional);
+                if let Some(ref m) = model {
+                    c.env("MANDATUM_MODEL", m);
+                }
+                if let Some(ref e) = effort {
+                    c.env("MANDATUM_EFFORT", e);
+                }
                 c
             }
         };
@@ -256,6 +267,8 @@ fn build_docker_command(
     script_name: &str,
     project_dir: &str,
     additional: &str,
+    model: Option<&str>,
+    effort: Option<&str>,
 ) -> Result<Command, std::io::Error> {
     let agents_dir_abs = std::fs::canonicalize(&config.agents_dir)?;
     let project_dir_abs = std::fs::canonicalize(project_dir)?;
@@ -322,6 +335,12 @@ fn build_docker_command(
         .or_else(|| std::env::var("ANTHROPIC_CUSTOM_HEADERS").ok());
     if let Some(val) = headers {
         cmd.args(["-e", &format!("ANTHROPIC_CUSTOM_HEADERS={val}")]);
+    }
+    if let Some(m) = model {
+        cmd.args(["-e", &format!("MANDATUM_MODEL={m}")]);
+    }
+    if let Some(e) = effort {
+        cmd.args(["-e", &format!("MANDATUM_EFFORT={e}")]);
     }
     // Always point the container at the host-side reverse proxy. Container
     // networking can't reach VPN-routed gateways directly, so claude calls

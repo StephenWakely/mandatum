@@ -127,12 +127,17 @@ EOF
 )"
 
   dump_agent_diagnostics "reviewer/$AGENT_ID" "$worktree_dir"
+  STREAM_TMP="$(mktemp)"
   (
     cd "$worktree_dir"
     claude --dangerously-skip-permissions \
       --mcp-config "$MCP_CONFIG" \
-      --print "$PROMPT"
-  ) 2>&1 | tee -a "$LOG_FILE" || true
+      --output-format stream-json --verbose \
+      "${CLAUDE_EXTRA_ARGS[@]}" \
+      --print "$PROMPT" 2>&1
+  ) | tee "$STREAM_TMP" | claude_stream_filter | tee -a "$LOG_FILE" || true
+  agent_run_summary "$STREAM_TMP" | tee -a "$LOG_FILE"
+  rm -f "$STREAM_TMP"
   echo ""
   if [ "${MANDATUM_ONCE:-0}" = "1" ]; then
     echo "[reviewer/$AGENT_ID] One-shot mode: exiting."
